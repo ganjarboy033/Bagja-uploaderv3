@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">kruzenlab-uploader</string>
+    <string name="welcome_subtitle">GitHub Cloud Repository Manager &amp; Batch Uploader</string>
+    <string name="dashboard_title">KruzenLab Workspace</string>
+    <string name="upload_title">Batch Commit &amp; Uploader</string>
+    <string name="login_title">GitHub Account &amp; OAuth Manager</string>
+    <string name="attribution_footer">Based on open-source architecture by AiraeXiyu (https://github.com/AiraeXiyu/XIYU-GITHUB-UPLOADER)</string>
+</resources>

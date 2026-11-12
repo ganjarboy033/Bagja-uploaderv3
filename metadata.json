@@ -1,0 +1,8 @@
+{
+  "name": "kruzenlab-uploader",
+  "description": "GitHub Cloud Repository Manager & Batch Uploader by DEV BAGJA / KruzenLab.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

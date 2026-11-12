@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand_dark">#292426</color>
+    <color name="brand_cream">#FBF7F1</color>
+    <color name="brand_rose">#BD8E91</color>
+    <color name="brand_soft_rose">#EADBD4</color>
+    <color name="brand_accent">#C8A96B</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
