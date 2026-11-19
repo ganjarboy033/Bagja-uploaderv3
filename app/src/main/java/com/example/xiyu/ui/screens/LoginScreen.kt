@@ -481,7 +481,9 @@ fun LoginScreen(
                                 onValueChange = { clientIdInput = it },
                                 label = { Text("Client ID (Opsional)", fontSize = 11.sp) },
                                 placeholder = { Text(OAuthHelper.FALLBACK_CLIENT_ID, fontSize = 11.sp) },
-                                singleLine = true,
+                                singleLine = false,
+                                minLines = 1,
+                                maxLines = 3,
                                 shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -492,9 +494,10 @@ fun LoginScreen(
                                 value = clientSecretInput,
                                 onValueChange = { clientSecretInput = it },
                                 label = { Text("Client Secret (Opsional)", fontSize = 11.sp) },
-                                placeholder = { Text("••••••••••••••••••••", fontSize = 11.sp) },
-                                singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
+                                placeholder = { Text(OAuthHelper.FALLBACK_CLIENT_SECRET, fontSize = 10.sp) },
+                                singleLine = false,
+                                minLines = 1,
+                                maxLines = 3,
                                 shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -505,8 +508,10 @@ fun LoginScreen(
                                 value = sessionPasswordInput,
                                 onValueChange = { sessionPasswordInput = it },
                                 label = { Text("Session Password (Min 32 Char)", fontSize = 11.sp) },
-                                placeholder = { Text("bagja_uploader_secret_session_key_32char_min", fontSize = 10.sp) },
-                                singleLine = true,
+                                placeholder = { Text(OAuthHelper.FALLBACK_SESSION_PASSWORD, fontSize = 10.sp) },
+                                singleLine = false,
+                                minLines = 1,
+                                maxLines = 3,
                                 shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -514,7 +519,7 @@ fun LoginScreen(
                             Spacer(modifier = Modifier.height(4.dp))
 
                             ThinHighlightText(
-                                text = "Status Fallback: ${if (clientIdInput.isBlank()) "Default aktif (Ov23lia8uQkruzenlab)" else "Kustom aktif"}"
+                                text = "Status Fallback: ${if (clientIdInput.isBlank()) "Default aktif (${OAuthHelper.FALLBACK_CLIENT_ID})" else "Kustom aktif"}"
                             )
 
                             Spacer(modifier = Modifier.height(8.dp))

@@ -127,17 +127,28 @@ fun DebugPanelScreen(
                 )
                 ThinHighlightText("Pengaturan kustomisasi session & SQLite backend.")
             }
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = BrandPalePink
-            ) {
-                Text(
-                    text = "SQLite Backend",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = BrandRose,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                RefreshIconButton(
+                    isRefreshing = isTestingPing,
+                    contentDescription = "Refresh Settings & SQLite",
+                    onClick = {
+                        repository.dbHelper.refreshAllSynchronously()
+                        toastController.showSuccess("Status sesi & database disinkronkan")
+                    },
+                    modifier = Modifier.testTag("refresh_settings_header_btn")
                 )
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = BrandPalePink
+                ) {
+                    Text(
+                        text = "SQLite Backend",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BrandRose,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
             }
         }
 
@@ -190,7 +201,9 @@ fun DebugPanelScreen(
                             value = sessionPassword,
                             onValueChange = { sessionPassword = it },
                             label = { Text("SESSION_PASSWORD (Backend Secret)") },
-                            singleLine = true,
+                            singleLine = false,
+                            minLines = 1,
+                            maxLines = 3,
                             shape = RoundedCornerShape(12.dp),
                             trailingIcon = {
                                 IconButton(onClick = {
@@ -221,7 +234,9 @@ fun DebugPanelScreen(
                             onValueChange = { clientId = it },
                             label = { Text("GitHub OAuth Client ID") },
                             placeholder = { Text(OAuthHelper.FALLBACK_CLIENT_ID) },
-                            singleLine = true,
+                            singleLine = false,
+                            minLines = 1,
+                            maxLines = 3,
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth().testTag("config_client_id_input")
                         )
@@ -236,8 +251,10 @@ fun DebugPanelScreen(
                             value = clientSecret,
                             onValueChange = { clientSecret = it },
                             label = { Text("GitHub OAuth Client Secret") },
-                            placeholder = { Text("••••••••••••••••••••") },
-                            singleLine = true,
+                            placeholder = { Text(OAuthHelper.FALLBACK_CLIENT_SECRET) },
+                            singleLine = false,
+                            minLines = 1,
+                            maxLines = 3,
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth().testTag("config_client_secret_input")
                         )
@@ -335,7 +352,17 @@ fun DebugPanelScreen(
                                 )
                                 ThinHighlightText("Riwayat panggilan REST API")
                             }
-                            Row {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                RefreshIconButton(
+                                    isRefreshing = isTestingPing,
+                                    iconSize = 16.dp,
+                                    contentDescription = "Refresh Log Jaringan",
+                                    onClick = {
+                                        repository.dbHelper.refreshAllSynchronously()
+                                        toastController.showSuccess("Log jaringan dimuat ulang")
+                                    },
+                                    modifier = Modifier.size(30.dp)
+                                )
                                 TextButton(
                                     onClick = {
                                         scope.launch {
@@ -454,8 +481,20 @@ fun DebugPanelScreen(
                                 )
                                 ThinHighlightText("Tersimpan di tabel commit_history")
                             }
-                            TextButton(onClick = { showResetDbConfirmDialog = true }) {
-                                Text("Reset DB", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                RefreshIconButton(
+                                    isRefreshing = false,
+                                    iconSize = 16.dp,
+                                    contentDescription = "Refresh Database",
+                                    onClick = {
+                                        repository.dbHelper.refreshAllSynchronously()
+                                        toastController.showSuccess("Tabel SQLite dimuat ulang")
+                                    },
+                                    modifier = Modifier.size(30.dp)
+                                )
+                                TextButton(onClick = { showResetDbConfirmDialog = true }) {
+                                    Text("Reset DB", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                                }
                             }
                         }
 

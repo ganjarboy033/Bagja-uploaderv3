@@ -15,7 +15,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -32,12 +31,14 @@ fun Topbar(
     currentUser: UserProfile?,
     rateLimit: RateLimitInfo?,
     currentScreen: String,
+    downloadsCount: Int = 0,
     onNavigate: (Screen) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier
             .fillMaxWidth()
+            .statusBarsPadding()
             .testTag("app_topbar"),
         color = BrandCream.copy(alpha = 0.98f),
         tonalElevation = 2.dp
@@ -81,18 +82,15 @@ fun Topbar(
                             fontSize = 15.sp,
                             color = BrandDark
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            ThinHighlightText(
-                                text = "DEV BAGJA · KruzenLab",
-                                fontSize = 10.sp,
-                                color = BrandRose
-                            )
-                        }
+                        ThinHighlightText(
+                            text = "DEV BAGJA · KruzenLab",
+                            fontSize = 10.sp,
+                            color = BrandRose
+                        )
                     }
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    // Rate Limit badge if available
                     if (rateLimit != null) {
                         Box(
                             modifier = Modifier
@@ -118,7 +116,6 @@ fun Topbar(
                         }
                     }
 
-                    // Debug & Settings quick button
                     IconButton(
                         onClick = { onNavigate(Screen.DebugPanel) },
                         modifier = Modifier
@@ -127,13 +124,12 @@ fun Topbar(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Tune,
-                            contentDescription = "Debug Panel",
+                            contentDescription = "Settings & Debug",
                             tint = if (currentScreen == Screen.DebugPanel.route) BrandDark else BrandRose,
                             modifier = Modifier.size(18.dp)
                         )
                     }
 
-                    // User account badge
                     if (currentUser != null) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -190,7 +186,7 @@ fun Topbar(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Navigation tabs with horizontal scrolling for mobile friendliness
+            // Scrollable navigation pills including new Downloads pill
             val scrollState = rememberScrollState()
             Row(
                 modifier = Modifier
@@ -234,6 +230,20 @@ fun Topbar(
                     testTag = "nav_workflows"
                 )
                 NavTab(
+                    icon = Icons.Default.MonitorHeart,
+                    label = "CI/CD Monitor",
+                    isSelected = currentScreen == Screen.CiCdMonitor.route,
+                    onClick = { onNavigate(Screen.CiCdMonitor) },
+                    testTag = "nav_cicd_monitor"
+                )
+                NavTab(
+                    icon = Icons.Default.Download,
+                    label = if (downloadsCount > 0) "Downloads ($downloadsCount)" else "Downloads",
+                    isSelected = currentScreen == Screen.Downloads.route,
+                    onClick = { onNavigate(Screen.Downloads) },
+                    testTag = "nav_downloads"
+                )
+                NavTab(
                     icon = Icons.Default.Tune,
                     label = "Settings",
                     isSelected = currentScreen == Screen.DebugPanel.route,
@@ -264,7 +274,7 @@ private fun NavTab(
         color = bgColor,
         border = if (borderStroke != null) androidx.compose.foundation.BorderStroke(borderStroke, BrandBorder) else null,
         modifier = modifier
-            .height(32.dp)
+            .height(34.dp)
             .testTag(testTag)
     ) {
         Row(

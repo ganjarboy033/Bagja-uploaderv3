@@ -5,7 +5,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.util.Base64
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,27 +16,25 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.xiyu.data.model.GitHubRepo
 import com.example.xiyu.data.model.RepoContentItem
 import com.example.xiyu.data.model.UserProfile
-import com.example.xiyu.data.repository.GitHubRepository
 import com.example.xiyu.ui.components.*
 import com.example.xiyu.ui.navigation.Screen
 import com.example.xiyu.ui.theme.*
+import com.example.xiyu.util.ZipExtractor
+import com.example.xiyu.viewmodel.AppStateViewModel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RepoExplorerScreen(
-    repository: GitHubRepository,
+    appViewModel: AppStateViewModel,
     currentUser: UserProfile?,
     onNavigate: (Screen) -> Unit,
     modifier: Modifier = Modifier
@@ -45,22 +42,24 @@ fun RepoExplorerScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val toastController = LocalToastController.current
+    val repository = appViewModel.repository
 
-    var repos by remember { mutableStateOf<List<GitHubRepo>>(emptyList()) }
-    var selectedRepo by remember { mutableStateOf<GitHubRepo?>(null) }
-    var currentPath by remember { mutableStateOf("") }
-    var contents by remember { mutableStateOf<List<RepoContentItem>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(false) }
+    val explorerState by appViewModel.explorerState.collectAsState()
+    val repos = explorerState.repos
+    val selectedRepo = explorerState.selectedRepo
+    val selectedBranch = explorerState.selectedBranch
+    val currentPath = explorerState.currentPath
+    val contents = explorerState.currentContents
+    val isLoading = explorerState.isLoading
 
     // Dialog States
     var showCreateFileDialog by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
-    var itemToEdit by remember { mutableStateOf<RepoContentItem?>(null) }
-    var editorContent by remember { mutableStateOf("") }
-    var editorCommitMsg by remember { mutableStateOf("") }
+    var editingTarget by remember { mutableStateOf<Pair<RepoContentItem, ByteArray>?>(null) }
     var isSavingEditor by remember { mutableStateOf(false) }
 
     var itemToDelete by remember { mutableStateOf<RepoContentItem?>(null) }
+    var dirToDelete by remember { mutableStateOf<RepoContentItem?>(null) }
     var itemToRename by remember { mutableStateOf<RepoContentItem?>(null) }
     var renameNewName by remember { mutableStateOf("") }
 
@@ -69,46 +68,35 @@ fun RepoExplorerScreen(
     val selectedItemPaths = remember { mutableStateListOf<String>() }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
 
-    fun refreshContents(repo: GitHubRepo, path: String) {
+    LaunchedEffect(Unit) {
+        appViewModel.ensureExplorerInitialized()
+    }
+
+    fun openItemInUniversalEditor(repo: GitHubRepo, item: RepoContentItem) {
         coroutineScope.launch {
-            isLoading = true
-            toastController.showInfo("Memuat direktori: /${path.ifEmpty { "root" }}", isLoading = true)
-            repository.getContents(
+            toastController.showInfo("Mengunduh ${item.name}...", isLoading = true)
+            repository.getSingleFileContent(
                 owner = repo.fullName.substringBefore('/'),
                 repo = repo.name,
-                path = path,
-                branch = repo.defaultBranch
+                path = item.path,
+                branch = selectedBranch
             ).fold(
-                onSuccess = { items ->
-                    isLoading = false
-                    contents = items.sortedWith(compareBy({ it.type != "dir" }, { it.name.lowercase() }))
-                    toastController.showSuccess("Direktori dimuat (${items.size} file/folder)")
+                onSuccess = { fullItem ->
+                    val rawBytes = if (!fullItem.content.isNullOrBlank()) {
+                        try {
+                            Base64.decode(fullItem.content.replace("\n", ""), Base64.DEFAULT)
+                        } catch (_: Exception) {
+                            fullItem.content.toByteArray(Charsets.UTF_8)
+                        }
+                    } else ByteArray(0)
+                    editingTarget = fullItem to rawBytes
+                    toastController.showSuccess("${item.name} siap diinspeksi")
                 },
                 onFailure = { err ->
-                    isLoading = false
-                    contents = emptyList()
-                    toastController.showError("Gagal memuat file: ${err.localizedMessage}")
+                    toastController.showError("Gagal mengambil isi file: ${err.localizedMessage}")
                 }
             )
         }
-    }
-
-    LaunchedEffect(Unit) {
-        isLoading = true
-        repository.getRepositories().fold(
-            onSuccess = { list ->
-                isLoading = false
-                repos = list
-                if (list.isNotEmpty() && selectedRepo == null) {
-                    selectedRepo = list.first()
-                    refreshContents(list.first(), "")
-                }
-            },
-            onFailure = {
-                isLoading = false
-                toastController.showError("Gagal mengambil repositori")
-            }
-        )
     }
 
     Scaffold(
@@ -143,38 +131,51 @@ fun RepoExplorerScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
-            // Header
+            // Header with Manual Refresh Control
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Cloud File Manager",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground
                     )
-                    ThinHighlightText("CRUD langsung ke repositori GitHub via Git Data API")
+                    ThinHighlightText("100% tanpa filter ekstensi · Cache folder persisten")
                 }
 
-                // Multi-select toggle button
-                IconButton(
-                    onClick = {
-                        isMultiSelectMode = !isMultiSelectMode
-                        selectedItemPaths.clear()
-                    }
-                ) {
-                    Icon(
-                        imageVector = if (isMultiSelectMode) Icons.Default.CheckCircle else Icons.Default.Checklist,
-                        contentDescription = "Multi Select",
-                        tint = if (isMultiSelectMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RefreshIconButton(
+                        isRefreshing = isLoading,
+                        contentDescription = "Refresh Repositori & Folder",
+                        onClick = {
+                            appViewModel.refreshExplorerRepos(resetPath = false) { err ->
+                                if (err != null) toastController.showError(err)
+                                else toastController.showSuccess("Daftar repositori & folder diperbarui")
+                            }
+                        },
+                        modifier = Modifier.testTag("refresh_explorer_header_btn")
                     )
+
+                    IconButton(
+                        onClick = {
+                            isMultiSelectMode = !isMultiSelectMode
+                            selectedItemPaths.clear()
+                        }
+                    ) {
+                        Icon(
+                            imageVector = if (isMultiSelectMode) Icons.Default.CheckCircle else Icons.Default.Checklist,
+                            contentDescription = "Multi Select",
+                            tint = if (isMultiSelectMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Repo Selector Dropdown
             var repoDropdownExpanded by remember { mutableStateOf(false) }
@@ -193,13 +194,14 @@ fun RepoExplorerScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                             Icon(Icons.Default.Folder, contentDescription = null, tint = BrandRose)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = selectedRepo?.fullName ?: "Pilih Repositori...",
                                 fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
                             )
                         }
                         Icon(Icons.Default.ArrowDropDown, contentDescription = null)
@@ -214,19 +216,17 @@ fun RepoExplorerScreen(
                         DropdownMenuItem(
                             text = { Text(repo.fullName) },
                             onClick = {
-                                selectedRepo = repo
-                                currentPath = ""
                                 repoDropdownExpanded = false
-                                refreshContents(repo, "")
+                                appViewModel.selectExplorerRepo(repo)
                             }
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Breadcrumbs Bar
+            // Breadcrumbs Bar with Per-Folder Manual Refresh Button
             Surface(
                 shape = RoundedCornerShape(10.dp),
                 color = BrandCardBg,
@@ -236,7 +236,7 @@ fun RepoExplorerScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -245,60 +245,59 @@ fun RepoExplorerScreen(
                         tint = BrandDark,
                         modifier = Modifier
                             .size(18.dp)
-                            .clickable {
-                                currentPath = ""
-                                selectedRepo?.let { refreshContents(it, "") }
-                            }
+                            .clickable { appViewModel.openExplorerPath("") }
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "/",
-                        color = BrandRose,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Text(text = "/", color = BrandRose, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.width(6.dp))
 
                     val pathSegments = currentPath.split("/").filter { it.isNotBlank() }
-                    if (pathSegments.isEmpty()) {
-                        ThinHighlightText("(root folder)")
-                    } else {
-                        pathSegments.forEachIndexed { index, seg ->
-                            val segPath = pathSegments.take(index + 1).joinToString("/")
-                            Text(
-                                text = seg,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = BrandDark,
-                                modifier = Modifier.clickable {
-                                    currentPath = segPath
-                                    selectedRepo?.let { refreshContents(it, segPath) }
-                                }
-                            )
-                            if (index < pathSegments.size - 1) {
+                    Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        if (pathSegments.isEmpty()) {
+                            ThinHighlightText("(root folder)")
+                        } else {
+                            pathSegments.forEachIndexed { index, seg ->
+                                val segPath = pathSegments.take(index + 1).joinToString("/")
                                 Text(
-                                    text = " / ",
+                                    text = seg,
                                     fontSize = 12.sp,
-                                    color = BrandRose
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = BrandDark,
+                                    modifier = Modifier.clickable { appViewModel.openExplorerPath(segPath) }
                                 )
+                                if (index < pathSegments.size - 1) {
+                                    Text(text = " / ", fontSize = 12.sp, color = BrandRose)
+                                }
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    // Up folder button
                     if (currentPath.isNotBlank()) {
                         IconButton(
                             onClick = {
                                 val parent = currentPath.substringBeforeLast('/', "")
-                                currentPath = parent
-                                selectedRepo?.let { refreshContents(it, parent) }
+                                appViewModel.openExplorerPath(parent)
                             },
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(30.dp)
                         ) {
-                            Icon(Icons.Default.ArrowUpward, contentDescription = "Up", modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.ArrowUpward, contentDescription = "Naik Folder", modifier = Modifier.size(16.dp))
                         }
                     }
+
+                    RefreshIconButton(
+                        isRefreshing = isLoading,
+                        contentDescription = "Refresh Folder Aktif",
+                        iconSize = 16.dp,
+                        onClick = {
+                            appViewModel.refreshCurrentExplorerFolder { err ->
+                                if (err != null) toastController.showError(err)
+                                else toastController.showSuccess("Isi folder diperbarui")
+                            }
+                        },
+                        modifier = Modifier
+                            .size(32.dp)
+                            .testTag("refresh_active_folder_btn")
+                    )
                 }
             }
 
@@ -338,7 +337,7 @@ fun RepoExplorerScreen(
             Spacer(modifier = Modifier.height(10.dp))
 
             // File & Folder List
-            if (isLoading) {
+            if (isLoading && contents.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -371,46 +370,21 @@ fun RepoExplorerScreen(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    items(contents) { item ->
+                    items(contents, key = { it.path }) { item ->
                         val isDir = item.type == "dir"
                         val isSelected = selectedItemPaths.contains(item.path)
 
                         Surface(
                             onClick = {
                                 if (isMultiSelectMode) {
-                                    if (isSelected) selectedItemPaths.remove(item.path)
-                                    else selectedItemPaths.add(item.path)
-                                } else if (isDir) {
-                                    currentPath = item.path
-                                    selectedRepo?.let { refreshContents(it, item.path) }
-                                } else {
-                                    // Open file in Cloud Code Editor
-                                    coroutineScope.launch {
-                                        toastController.showInfo("Mengunduh ${item.name}...", isLoading = true)
-                                        selectedRepo?.let { r ->
-                                            repository.getSingleFileContent(
-                                                owner = r.fullName.substringBefore('/'),
-                                                repo = r.name,
-                                                path = item.path,
-                                                branch = r.defaultBranch
-                                            ).fold(
-                                                onSuccess = { fullItem ->
-                                                    val decoded = if (!fullItem.content.isNullOrBlank()) {
-                                                        try {
-                                                            String(Base64.decode(fullItem.content.replace("\n", ""), Base64.DEFAULT))
-                                                        } catch (_: Exception) { fullItem.content }
-                                                    } else ""
-                                                    itemToEdit = fullItem
-                                                    editorContent = decoded
-                                                    editorCommitMsg = "Update ${item.name} via kruzenlab-uploader"
-                                                    toastController.showSuccess("Editor dibuka")
-                                                },
-                                                onFailure = {
-                                                    toastController.showError("Gagal mengambil isi file")
-                                                }
-                                            )
-                                        }
+                                    if (!isDir) {
+                                        if (isSelected) selectedItemPaths.remove(item.path)
+                                        else selectedItemPaths.add(item.path)
                                     }
+                                } else if (isDir) {
+                                    appViewModel.openExplorerPath(item.path)
+                                } else {
+                                    selectedRepo?.let { openItemInUniversalEditor(it, item) }
                                 }
                             },
                             shape = RoundedCornerShape(12.dp),
@@ -425,11 +399,11 @@ fun RepoExplorerScreen(
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (isMultiSelectMode) {
+                                if (isMultiSelectMode && !isDir) {
                                     Checkbox(
                                         checked = isSelected,
                                         onCheckedChange = { checked ->
-                                            if (checked == true) selectedItemPaths.add(item.path)
+                                            if (checked) selectedItemPaths.add(item.path)
                                             else selectedItemPaths.remove(item.path)
                                         },
                                         modifier = Modifier.size(24.dp)
@@ -452,12 +426,12 @@ fun RepoExplorerScreen(
                                         fontWeight = if (isDir) FontWeight.Bold else FontWeight.Medium
                                     )
                                     ThinHighlightText(
-                                        if (isDir) "Direktori"
-                                        else "${item.size} bytes · SHA: ${item.sha.take(7)}"
+                                        if (isDir) "Direktori · Tap untuk membuka"
+                                        else "${ZipExtractor.formatSize(item.size)} · SHA: ${item.sha.take(7)}"
                                     )
                                 }
 
-                                // Quick actions menu for item
+                                // Quick actions menu
                                 var itemMenuExpanded by remember { mutableStateOf(false) }
                                 Box {
                                     IconButton(
@@ -473,47 +447,24 @@ fun RepoExplorerScreen(
                                     ) {
                                         if (!isDir) {
                                             DropdownMenuItem(
-                                                text = { Text("Edit di Cloud") },
+                                                text = { Text("Buka di Editor Universal") },
                                                 leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
                                                 onClick = {
                                                     itemMenuExpanded = false
-                                                    coroutineScope.launch {
-                                                        selectedRepo?.let { r ->
-                                                            repository.getSingleFileContent(
-                                                                owner = r.fullName.substringBefore('/'),
-                                                                repo = r.name,
-                                                                path = item.path,
-                                                                branch = r.defaultBranch
-                                                            ).fold(
-                                                                onSuccess = { fullItem ->
-                                                                    val decoded = if (!fullItem.content.isNullOrBlank()) {
-                                                                        try {
-                                                                            String(Base64.decode(fullItem.content.replace("\n", ""), Base64.DEFAULT))
-                                                                        } catch (_: Exception) { fullItem.content }
-                                                                    } else ""
-                                                                    itemToEdit = fullItem
-                                                                    editorContent = decoded
-                                                                    editorCommitMsg = "Update ${item.name} via kruzenlab-uploader"
-                                                                },
-                                                                onFailure = {
-                                                                    toastController.showError("Gagal membuka file")
-                                                                }
-                                                            )
-                                                        }
-                                                    }
+                                                    selectedRepo?.let { openItemInUniversalEditor(it, item) }
+                                                }
+                                            )
+
+                                            DropdownMenuItem(
+                                                text = { Text("Rename") },
+                                                leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) },
+                                                onClick = {
+                                                    itemMenuExpanded = false
+                                                    itemToRename = item
+                                                    renameNewName = item.name
                                                 }
                                             )
                                         }
-
-                                        DropdownMenuItem(
-                                            text = { Text("Rename") },
-                                            leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) },
-                                            onClick = {
-                                                itemMenuExpanded = false
-                                                itemToRename = item
-                                                renameNewName = item.name
-                                            }
-                                        )
 
                                         DropdownMenuItem(
                                             text = { Text("Salin Raw URL") },
@@ -521,7 +472,7 @@ fun RepoExplorerScreen(
                                             onClick = {
                                                 itemMenuExpanded = false
                                                 selectedRepo?.let { r ->
-                                                    val rawUrl = "https://raw.githubusercontent.com/${r.fullName}/${r.defaultBranch}/${item.path}"
+                                                    val rawUrl = "https://raw.githubusercontent.com/${r.fullName}/$selectedBranch/${item.path}"
                                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                                     clipboard.setPrimaryClip(ClipData.newPlainText("Raw URL", rawUrl))
                                                     toastController.showSuccess("Raw URL disalin!")
@@ -535,7 +486,7 @@ fun RepoExplorerScreen(
                                             onClick = {
                                                 itemMenuExpanded = false
                                                 selectedRepo?.let { r ->
-                                                    val cdnUrl = "https://cdn.jsdelivr.net/gh/${r.fullName}@${r.defaultBranch}/${item.path}"
+                                                    val cdnUrl = "https://cdn.jsdelivr.net/gh/${r.fullName}@$selectedBranch/${item.path}"
                                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                                     clipboard.setPrimaryClip(ClipData.newPlainText("jsDelivr CDN", cdnUrl))
                                                     toastController.showSuccess("jsDelivr CDN URL disalin!")
@@ -545,14 +496,25 @@ fun RepoExplorerScreen(
 
                                         HorizontalDivider()
 
-                                        DropdownMenuItem(
-                                            text = { Text("Hapus", color = MaterialTheme.colorScheme.error) },
-                                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                                            onClick = {
-                                                itemMenuExpanded = false
-                                                itemToDelete = item
-                                            }
-                                        )
+                                        if (isDir) {
+                                            DropdownMenuItem(
+                                                text = { Text("Hapus Folder (Atomic)", color = MaterialTheme.colorScheme.error) },
+                                                leadingIcon = { Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                                onClick = {
+                                                    itemMenuExpanded = false
+                                                    dirToDelete = item
+                                                }
+                                            )
+                                        } else {
+                                            DropdownMenuItem(
+                                                text = { Text("Hapus File", color = MaterialTheme.colorScheme.error) },
+                                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                                onClick = {
+                                                    itemMenuExpanded = false
+                                                    itemToDelete = item
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -561,7 +523,6 @@ fun RepoExplorerScreen(
                 }
             }
 
-            // Attribution Footer
             AttributionFooter()
         }
     }
@@ -580,7 +541,7 @@ fun RepoExplorerScreen(
                     OutlinedTextField(
                         value = newFileName,
                         onValueChange = { newFileName = it },
-                        label = { Text("Nama File (e.g., config.json atau main.py)") },
+                        label = { Text("Nama File (e.g., .gitignore, config.json)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -599,7 +560,7 @@ fun RepoExplorerScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    ThinHighlightText("File akan langsung di-commit ke branch ${selectedRepo?.defaultBranch ?: "main"}")
+                    ThinHighlightText("File akan langsung di-commit ke branch $selectedBranch")
                 }
             },
             confirmButton = {
@@ -617,11 +578,11 @@ fun RepoExplorerScreen(
                                     path = path,
                                     contentBase64 = encoded,
                                     commitMessage = newFileCommitMsg.ifBlank { "Create $path via kruzenlab-uploader" },
-                                    branch = r.defaultBranch
+                                    branch = selectedBranch
                                 ).fold(
                                     onSuccess = {
                                         toastController.showSuccess("File $path berhasil dibuat!")
-                                        refreshContents(r, currentPath)
+                                        appViewModel.refreshCurrentExplorerFolder()
                                     },
                                     onFailure = { err ->
                                         toastController.showError("Gagal membuat file: ${err.localizedMessage}")
@@ -674,11 +635,11 @@ fun RepoExplorerScreen(
                                     owner = r.fullName.substringBefore('/'),
                                     repo = r.name,
                                     folderPath = targetFolder,
-                                    branch = r.defaultBranch
+                                    branch = selectedBranch
                                 ).fold(
                                     onSuccess = {
                                         toastController.showSuccess("Folder $targetFolder dibuat!")
-                                        refreshContents(r, currentPath)
+                                        appViewModel.refreshCurrentExplorerFolder()
                                     },
                                     onFailure = { err ->
                                         toastController.showError("Gagal membuat folder: ${err.localizedMessage}")
@@ -700,91 +661,43 @@ fun RepoExplorerScreen(
         )
     }
 
-    // Modal: Cloud Code Editor
-    if (itemToEdit != null) {
-        AlertDialog(
-            onDismissRequest = { if (!isSavingEditor) itemToEdit = null },
-            title = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Cloud Code Editor", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    ThinHighlightBadge(itemToEdit?.name ?: "")
-                }
-            },
-            text = {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ThinHighlightText("Edit langsung kode file di remote GitHub:")
-                    OutlinedTextField(
-                        value = editorContent,
-                        onValueChange = { editorContent = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(280.dp),
-                        textStyle = LocalTextStyle.current.copy(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            lineHeight = 16.sp
-                        )
-                    )
-                    OutlinedTextField(
-                        value = editorCommitMsg,
-                        onValueChange = { editorCommitMsg = it },
-                        placeholder = { Text("Pesan commit") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        isSavingEditor = true
-                        val target = itemToEdit ?: return@Button
-                        val encoded = Base64.encodeToString(editorContent.toByteArray(), Base64.NO_WRAP)
-                        coroutineScope.launch {
-                            toastController.showInfo("Menyimpan perubahan ke GitHub...", isLoading = true)
-                            selectedRepo?.let { r ->
-                                repository.createOrUpdateFile(
-                                    owner = r.fullName.substringBefore('/'),
-                                    repo = r.name,
-                                    path = target.path,
-                                    contentBase64 = encoded,
-                                    commitMessage = editorCommitMsg.ifBlank { "Update ${target.name}" },
-                                    sha = target.sha,
-                                    branch = r.defaultBranch
-                                ).fold(
-                                    onSuccess = {
-                                        isSavingEditor = false
-                                        itemToEdit = null
-                                        toastController.showSuccess("File ${target.name} berhasil disimpan!")
-                                        refreshContents(r, currentPath)
-                                    },
-                                    onFailure = { err ->
-                                        isSavingEditor = false
-                                        toastController.showError("Gagal menyimpan: ${err.localizedMessage}")
-                                    }
-                                )
+    // Universal Multi-Mode File Editor & Inspector
+    if (editingTarget != null) {
+        val (targetItem, rawBytes) = editingTarget!!
+        UniversalFileEditorDialog(
+            fileName = targetItem.name,
+            filePath = targetItem.path,
+            initialBytes = rawBytes,
+            allowRemoteCommit = true,
+            isSaving = isSavingEditor,
+            onDismiss = { if (!isSavingEditor) editingTarget = null },
+            onSaveBytes = { updatedBytes, msg ->
+                isSavingEditor = true
+                val encoded = Base64.encodeToString(updatedBytes, Base64.NO_WRAP)
+                coroutineScope.launch {
+                    toastController.showInfo("Menyimpan perubahan ke GitHub...", isLoading = true)
+                    selectedRepo?.let { r ->
+                        repository.createOrUpdateFile(
+                            owner = r.fullName.substringBefore('/'),
+                            repo = r.name,
+                            path = targetItem.path,
+                            contentBase64 = encoded,
+                            commitMessage = msg,
+                            sha = targetItem.sha,
+                            branch = selectedBranch
+                        ).fold(
+                            onSuccess = {
+                                isSavingEditor = false
+                                editingTarget = null
+                                toastController.showSuccess("File ${targetItem.name} berhasil disimpan!")
+                                appViewModel.refreshCurrentExplorerFolder()
+                            },
+                            onFailure = { err ->
+                                isSavingEditor = false
+                                toastController.showError("Gagal menyimpan: ${err.localizedMessage}")
                             }
-                        }
-                    },
-                    enabled = !isSavingEditor
-                ) {
-                    if (isSavingEditor) CircularProgressIndicator(modifier = Modifier.size(16.dp), color = MaterialTheme.colorScheme.onPrimary)
-                    else Text("Commit & Save")
-                }
-            },
-            dismissButton = {
-                OutlinedButton(
-                    onClick = { itemToEdit = null },
-                    enabled = !isSavingEditor
-                ) {
-                    Text("Batal")
+                        )
+                    }
                 }
             }
         )
@@ -805,7 +718,7 @@ fun RepoExplorerScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    ThinHighlightText("Sistem akan memindahkan blob dan menghapus path lama secara atomic.")
+                    ThinHighlightText("Sistem akan memindahkan blob dan menghapus path lama.")
                 }
             },
             confirmButton = {
@@ -816,35 +729,32 @@ fun RepoExplorerScreen(
                         coroutineScope.launch {
                             toastController.showInfo("Mengubah nama menjadi $newPath...", isLoading = true)
                             selectedRepo?.let { r ->
-                                // 1. Read existing file content
                                 repository.getSingleFileContent(
                                     owner = r.fullName.substringBefore('/'),
                                     repo = r.name,
                                     path = target.path,
-                                    branch = r.defaultBranch
+                                    branch = selectedBranch
                                 ).fold(
                                     onSuccess = { fullItem ->
-                                        // 2. Put to new path
                                         repository.createOrUpdateFile(
                                             owner = r.fullName.substringBefore('/'),
                                             repo = r.name,
                                             path = newPath,
                                             contentBase64 = fullItem.content ?: "",
                                             commitMessage = "Rename ${target.path} to $newPath",
-                                            branch = r.defaultBranch
+                                            branch = selectedBranch
                                         ).fold(
                                             onSuccess = {
-                                                // 3. Delete old path
                                                 repository.deleteFile(
                                                     owner = r.fullName.substringBefore('/'),
                                                     repo = r.name,
                                                     path = target.path,
                                                     sha = target.sha,
                                                     commitMessage = "Remove old path ${target.path}",
-                                                    branch = r.defaultBranch
+                                                    branch = selectedBranch
                                                 )
                                                 toastController.showSuccess("Item berhasil di-rename!")
-                                                refreshContents(r, currentPath)
+                                                appViewModel.refreshCurrentExplorerFolder()
                                             },
                                             onFailure = { err ->
                                                 toastController.showError("Gagal rename: ${err.localizedMessage}")
@@ -871,7 +781,7 @@ fun RepoExplorerScreen(
         )
     }
 
-    // Modal: Confirmation for Single Delete
+    // Modal: Confirmation for Single File Delete
     if (itemToDelete != null) {
         val target = itemToDelete!!
         UniversalConfirmDialog(
@@ -889,11 +799,11 @@ fun RepoExplorerScreen(
                             path = target.path,
                             sha = target.sha,
                             commitMessage = "Delete ${target.path} via kruzenlab-uploader",
-                            branch = r.defaultBranch
+                            branch = selectedBranch
                         ).fold(
                             onSuccess = {
                                 toastController.showSuccess("File ${target.name} berhasil dihapus!")
-                                refreshContents(r, currentPath)
+                                appViewModel.refreshCurrentExplorerFolder()
                             },
                             onFailure = { err ->
                                 toastController.showError("Gagal menghapus file: ${err.localizedMessage}")
@@ -903,6 +813,39 @@ fun RepoExplorerScreen(
                 }
             },
             onDismiss = { itemToDelete = null }
+        )
+    }
+
+    // Modal: Confirmation for Atomic Directory Delete
+    if (dirToDelete != null) {
+        val targetDir = dirToDelete!!
+        UniversalConfirmDialog(
+            title = "Hapus Folder Permanen (Atomic)?",
+            message = "Seluruh isi folder \"${targetDir.path}\" dan semua sub-foldernya akan dihapus dalam 1 commit tunggal Git Data API.",
+            confirmText = "Hapus Folder",
+            isDestructive = true,
+            onConfirm = {
+                coroutineScope.launch {
+                    toastController.showInfo("Menghapus folder ${targetDir.name} secara atomic...", isLoading = true)
+                    selectedRepo?.let { r ->
+                        repository.deleteDirectory(
+                            owner = r.fullName.substringBefore('/'),
+                            repo = r.name,
+                            branch = selectedBranch,
+                            folderPath = targetDir.path
+                        ).fold(
+                            onSuccess = {
+                                toastController.showSuccess("Folder ${targetDir.name} dihapus dalam 1 commit!")
+                                appViewModel.refreshCurrentExplorerFolder()
+                            },
+                            onFailure = { err ->
+                                toastController.showError("Gagal menghapus folder: ${err.localizedMessage}")
+                            }
+                        )
+                    }
+                }
+            },
+            onDismiss = { dirToDelete = null }
         )
     }
 
@@ -929,13 +872,13 @@ fun RepoExplorerScreen(
                                     path = item.path,
                                     sha = item.sha,
                                     commitMessage = "Batch delete ${item.name}",
-                                    branch = r.defaultBranch
+                                    branch = selectedBranch
                                 )
                                 successCount++
                             }
                         }
                         toastController.showSuccess("$successCount file berhasil dihapus!")
-                        refreshContents(r, currentPath)
+                        appViewModel.refreshCurrentExplorerFolder()
                     }
                 }
             },

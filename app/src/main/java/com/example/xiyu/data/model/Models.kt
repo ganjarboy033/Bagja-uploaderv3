@@ -2,6 +2,11 @@ package com.example.xiyu.data.model
 
 import com.google.gson.annotations.SerializedName
 
+enum class UploadArchiveMode {
+    ATOMIC_EXTRACT,
+    RAW_ZIP
+}
+
 data class UserProfile(
     val login: String,
     val name: String? = null,
@@ -22,9 +27,11 @@ data class GitHubRepo(
 
 data class FileEntry(
     val path: String,
-    val contentBase64: String,
+    val contentBase64: String = "",
     val size: Long,
-    var isSelected: Boolean = true
+    var isSelected: Boolean = true,
+    val rawRelativePath: String = path,
+    val localStagingPath: String? = null
 )
 
 data class CommitResult(
@@ -85,7 +92,8 @@ data class GitHubRelease(
     val body: String?,
     val prerelease: Boolean,
     @SerializedName("created_at") val createdAt: String?,
-    @SerializedName("html_url") val htmlUrl: String?
+    @SerializedName("html_url") val htmlUrl: String?,
+    @SerializedName("upload_url") val uploadUrl: String? = null
 )
 
 data class CreateReleaseRequest(
@@ -94,6 +102,13 @@ data class CreateReleaseRequest(
     val body: String,
     val draft: Boolean = false,
     val prerelease: Boolean = false
+)
+
+data class ReleaseAssetAttachment(
+    val displayName: String,
+    val localFilePath: String? = null, // When sourced from internal Downloads
+    val contentUriString: String? = null, // When sourced from device SAF picker
+    val sizeBytes: Long = 0L
 )
 
 data class WorkflowRunsResponse(
@@ -108,7 +123,56 @@ data class WorkflowRun(
     val status: String?, // completed, in_progress, queued
     val conclusion: String?, // success, failure, cancelled
     @SerializedName("html_url") val htmlUrl: String?,
-    @SerializedName("created_at") val createdAt: String?
+    @SerializedName("created_at") val createdAt: String?,
+    @SerializedName("updated_at") val updatedAt: String? = null
+)
+
+data class WorkflowJobsResponse(
+    @SerializedName("total_count") val totalCount: Int,
+    val jobs: List<WorkflowJob>
+)
+
+data class WorkflowJob(
+    val id: Long,
+    @SerializedName("run_id") val runId: Long = 0L,
+    val name: String,
+    val status: String?,
+    val conclusion: String?,
+    @SerializedName("started_at") val startedAt: String? = null,
+    @SerializedName("completed_at") val completedAt: String? = null,
+    val steps: List<WorkflowStep> = emptyList()
+)
+
+data class WorkflowStep(
+    val name: String,
+    val status: String?,
+    val conclusion: String?,
+    val number: Int,
+    @SerializedName("started_at") val startedAt: String? = null,
+    @SerializedName("completed_at") val completedAt: String? = null
+)
+
+data class WorkflowArtifactsResponse(
+    @SerializedName("total_count") val totalCount: Int,
+    val artifacts: List<WorkflowArtifact>
+)
+
+data class WorkflowArtifact(
+    val id: Long,
+    val name: String,
+    @SerializedName("size_in_bytes") val sizeInBytes: Long,
+    val expired: Boolean = false,
+    @SerializedName("archive_download_url") val archiveDownloadUrl: String? = null,
+    @SerializedName("created_at") val createdAt: String? = null
+)
+
+data class ExtractedArtifactFile(
+    val name: String,
+    val relativePath: String,
+    val localCachePath: String,
+    val sizeBytes: Long,
+    val isApk: Boolean,
+    val isTextLike: Boolean
 )
 
 data class GitHubBranch(
@@ -119,6 +183,49 @@ data class GitHubBranch(
 data class BranchCommit(
     val sha: String,
     val url: String?
+)
+
+// Full Recursive Tree DTOs (for atomic directory deletion)
+data class GitTreeResponse(
+    val sha: String,
+    val tree: List<GitTreeNode>,
+    val truncated: Boolean = false
+)
+
+data class GitTreeNode(
+    val path: String,
+    val mode: String,
+    val type: String, // "blob" or "tree"
+    val sha: String,
+    val size: Long? = null
+)
+
+// Internal Downloads & Background Upload Queue Models
+data class DownloadRecord(
+    val id: Long = 0,
+    val repoFullName: String,
+    val fileName: String,
+    val fileType: String, // "apk", "zip", "log", "asset"
+    val localPath: String,
+    val sizeBytes: Long,
+    val sourceRunId: Long? = null,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+data class UploadQueueItem(
+    val id: Long = 0,
+    val batchId: String,
+    val owner: String,
+    val repo: String,
+    val branch: String,
+    val commitMessage: String,
+    val uploadMode: String, // "ATOMIC_EXTRACT" or "RAW_ZIP"
+    val filePath: String,
+    val localStagingPath: String,
+    val sizeBytes: Long,
+    val blobSha: String? = null,
+    val status: String = "PENDING", // "PENDING", "UPLOADED", "FAILED", "DONE"
+    val updatedAt: Long = System.currentTimeMillis()
 )
 
 // API Request/Response DTOs

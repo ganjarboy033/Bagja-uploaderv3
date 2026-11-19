@@ -21,9 +21,9 @@ object OAuthHelper {
     private const val KEY_SESSION_PASSWORD = "oauth_session_password"
     private const val KEY_LAST_STATE = "oauth_last_state"
 
-    // Default Fallback values
-    const val FALLBACK_CLIENT_ID = "Ov23lia8uQkruzenlab"
-    const val FALLBACK_CLIENT_SECRET = "kruzen_sec_fallback_default"
+    // Exact Default Fallback values
+    const val FALLBACK_CLIENT_ID = "Ov23lizAXWwIXYOXCLKg"
+    const val FALLBACK_CLIENT_SECRET = "1b02b712f931cc0eed574a1c98a581f63d5fadb7"
     const val FALLBACK_SESSION_PASSWORD = "bagja_uploader_secret_session_key_32char_min"
 
     const val REDIRECT_URI = "kruzenlab://oauth-callback"
@@ -81,9 +81,6 @@ object OAuthHelper {
             .getString(KEY_LAST_STATE, null)
     }
 
-    /**
-     * Launch Chrome or the system browser directed to GitHub OAuth authorization.
-     */
     fun launchChromeOAuth(context: Context, clientId: String? = null): Boolean {
         val activeClientId = if (!clientId.isNullOrBlank()) clientId else getClientId(context)
         val state = UUID.randomUUID().toString()
@@ -100,9 +97,6 @@ object OAuthHelper {
         return openInChromeOrBrowser(context, authUri)
     }
 
-    /**
-     * Open Chrome directly to the GitHub Token creation page with pre-filled scopes.
-     */
     fun openChromeForTokenCreation(context: Context): Boolean {
         val tokenPageUri = Uri.parse(
             "https://github.com/settings/tokens/new?description=kruzenlab-uploader&scopes=repo,read:user,user:email,workflow,delete_repo"

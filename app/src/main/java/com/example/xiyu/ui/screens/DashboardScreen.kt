@@ -24,48 +24,40 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.xiyu.data.model.GitHubRepo
 import com.example.xiyu.data.model.UserProfile
-import com.example.xiyu.data.repository.GitHubRepository
 import com.example.xiyu.ui.components.*
 import com.example.xiyu.ui.navigation.Screen
 import com.example.xiyu.ui.theme.*
+import com.example.xiyu.viewmodel.AppStateViewModel
 import kotlinx.coroutines.launch
 
 @Composable
 fun DashboardScreen(
-    repository: GitHubRepository,
+    appViewModel: AppStateViewModel,
     currentUser: UserProfile?,
     onNavigate: (Screen) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val repository = appViewModel.repository
     val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
     val toastController = LocalToastController.current
 
-    var repos by remember { mutableStateOf<List<GitHubRepo>>(emptyList()) }
-    var isLoadingRepos by remember { mutableStateOf(false) }
+    val dashState by appViewModel.dashboardState.collectAsState()
+    val repos = dashState.repos
+    val isLoadingRepos = dashState.isLoading
     val rateLimit by repository.rateLimit.collectAsState()
 
     var repoToDelete by remember { mutableStateOf<GitHubRepo?>(null) }
 
-    fun loadRepos() {
-        coroutineScope.launch {
-            isLoadingRepos = true
-            repository.getRepositories().fold(
-                onSuccess = {
-                    repos = it
-                    isLoadingRepos = false
-                },
-                onFailure = {
-                    isLoadingRepos = false
-                    toastController.showError("Gagal memuat repositori: ${it.localizedMessage}")
-                }
-            )
-            repository.fetchRateLimit()
-        }
+    fun manualRefreshRepos() {
+        appViewModel.refreshDashboard(
+            onError = { msg -> toastController.showError("Gagal memuat repositori: $msg") },
+            onSuccess = { toastController.showSuccess("Dashboard diperbarui!") }
+        )
     }
 
-    LaunchedEffect(currentUser) {
-        loadRepos()
+    LaunchedEffect(Unit) {
+        appViewModel.ensureDashboardInitialized()
     }
 
     Column(
@@ -76,23 +68,37 @@ fun DashboardScreen(
             .padding(horizontal = 20.dp, vertical = 16.dp)
             .testTag("dashboard_screen")
     ) {
-        // Workspace greeting
-        Text(
-            text = "KRUZENLAB WORKSPACE ⚡",
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            color = BrandRose,
-            letterSpacing = 1.6.sp
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "Welcome back, ${currentUser?.name ?: currentUser?.login ?: "Developer"}.",
-            fontFamily = FontFamily.SansSerif,
-            fontWeight = FontWeight.Bold,
-            fontSize = 26.sp,
-            lineHeight = 32.sp,
-            color = BrandDark
-        )
+        // Workspace greeting with Manual Refresh Control
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "KRUZENLAB WORKSPACE ⚡",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = BrandRose,
+                    letterSpacing = 1.6.sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Welcome back, ${currentUser?.name ?: currentUser?.login ?: "Developer"}.",
+                    fontFamily = FontFamily.SansSerif,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 24.sp,
+                    lineHeight = 30.sp,
+                    color = BrandDark
+                )
+            }
+            RefreshIconButton(
+                isRefreshing = isLoadingRepos,
+                contentDescription = "Refresh Dashboard",
+                onClick = { manualRefreshRepos() },
+                modifier = Modifier.testTag("refresh_dashboard_header_btn")
+            )
+        }
         ThinHighlightText("kruzenlab-uploader · Cloud Git Engine siap digunakan.")
 
         Spacer(modifier = Modifier.height(14.dp))
@@ -323,9 +329,13 @@ fun DashboardScreen(
                 fontSize = 16.sp,
                 color = BrandDark
             )
-            IconButton(onClick = { loadRepos() }) {
-                Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(18.dp))
-            }
+            RefreshIconButton(
+                isRefreshing = isLoadingRepos,
+                iconSize = 18.dp,
+                contentDescription = "Refresh Daftar Repositori",
+                onClick = { manualRefreshRepos() },
+                modifier = Modifier.size(34.dp)
+            )
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -403,7 +413,7 @@ fun DashboardScreen(
                     repository.deleteRepository(owner, target.name).fold(
                         onSuccess = {
                             toastController.showSuccess("Repositori ${target.name} berhasil dihapus!")
-                            loadRepos()
+                            manualRefreshRepos()
                         },
                         onFailure = { err ->
                             toastController.showError("Gagal menghapus repositori: ${err.localizedMessage}")

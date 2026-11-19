@@ -28,7 +28,7 @@ interface GitHubApiService {
         @Header("Authorization") auth: String,
         @Query("sort") sort: String = "updated",
         @Query("per_page") perPage: Int = 100,
-        @Query("affiliation") affiliation: String = "owner"
+        @Query("affiliation") affiliation: String = "owner,collaborator"
     ): List<GitHubRepoResponse>
 
     @POST("user/repos")
@@ -44,7 +44,7 @@ interface GitHubApiService {
         @Path("repo") repo: String
     ): Response<Unit>
 
-    // Repository Contents CRUD
+    // Repository Contents CRUD (unrestricted)
     @GET("repos/{owner}/{repo}/contents/{path}")
     suspend fun getContents(
         @Header("Authorization") auth: String,
@@ -98,6 +98,15 @@ interface GitHubApiService {
         @Path("sha") sha: String
     ): CommitDetailResponse
 
+    @GET("repos/{owner}/{repo}/git/trees/{tree_sha}")
+    suspend fun getGitTree(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("tree_sha") treeSha: String,
+        @Query("recursive") recursive: Int = 1
+    ): GitTreeResponse
+
     @POST("repos/{owner}/{repo}/git/blobs")
     suspend fun createBlob(
         @Header("Authorization") auth: String,
@@ -144,7 +153,8 @@ interface GitHubApiService {
     suspend fun getBranches(
         @Header("Authorization") auth: String,
         @Path("owner") owner: String,
-        @Path("repo") repo: String
+        @Path("repo") repo: String,
+        @Query("per_page") perPage: Int = 100
     ): List<GitHubBranch>
 
     // Releases
@@ -163,12 +173,13 @@ interface GitHubApiService {
         @Body request: CreateReleaseRequest
     ): GitHubRelease
 
-    // GitHub Actions Workflows
+    // GitHub Actions Workflows, Logs & Artifacts
     @GET("repos/{owner}/{repo}/actions/runs")
     suspend fun getWorkflowRuns(
         @Header("Authorization") auth: String,
         @Path("owner") owner: String,
-        @Path("repo") repo: String
+        @Path("repo") repo: String,
+        @Query("per_page") perPage: Int = 30
     ): WorkflowRunsResponse
 
     @POST("repos/{owner}/{repo}/actions/runs/{run_id}/rerun")
@@ -179,24 +190,72 @@ interface GitHubApiService {
         @Path("run_id") runId: Long
     ): Response<Unit>
 
+    @Streaming
+    @GET("repos/{owner}/{repo}/actions/runs/{run_id}/logs")
+    suspend fun downloadWorkflowLogs(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("run_id") runId: Long
+    ): Response<ResponseBody>
+
+    @GET("repos/{owner}/{repo}/actions/runs/{run_id}/jobs")
+    suspend fun getWorkflowJobs(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("run_id") runId: Long,
+        @Query("per_page") perPage: Int = 50
+    ): WorkflowJobsResponse
+
+    @Streaming
+    @GET("repos/{owner}/{repo}/actions/jobs/{job_id}/logs")
+    suspend fun downloadJobLogs(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("job_id") jobId: Long
+    ): Response<ResponseBody>
+
+    @GET("repos/{owner}/{repo}/actions/runs/{run_id}/artifacts")
+    suspend fun getWorkflowArtifacts(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("run_id") runId: Long
+    ): WorkflowArtifactsResponse
+
+    @Streaming
+    @GET("repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip")
+    suspend fun downloadArtifactZip(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("artifact_id") artifactId: Long
+    ): Response<ResponseBody>
+
     companion object {
         const val DEFAULT_BASE_URL = "https://api.github.com/"
 
-        fun create(
-            baseUrl: String = DEFAULT_BASE_URL,
-            dbHelper: AppDatabaseHelper? = null
-        ): GitHubApiService {
+        fun buildOkHttpClient(dbHelper: AppDatabaseHelper? = null): OkHttpClient {
             val logging = HttpLoggingInterceptor().apply {
                 level = HttpLoggingInterceptor.Level.BASIC
             }
 
-            val clientBuilder = OkHttpClient.Builder()
+            return OkHttpClient.Builder()
                 .addInterceptor(logging)
                 .addInterceptor { chain ->
                     val original = chain.request()
-                    val request = original.newBuilder()
-                        .header("Accept", "application/vnd.github+json")
-                        .header("X-GitHub-Api-Version", "2022-11-28")
+                    val isGitHubHost = original.url.host.endsWith("github.com", ignoreCase = true) ||
+                        original.url.host.endsWith("githubusercontent.com", ignoreCase = true)
+
+                    val requestBuilder = original.newBuilder()
+                    if (isGitHubHost) {
+                        requestBuilder
+                            .header("Accept", original.header("Accept") ?: "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                    }
+                    val request = requestBuilder
                         .method(original.method, original.body)
                         .build()
 
@@ -224,15 +283,40 @@ interface GitHubApiService {
                         throw e
                     }
                 }
+                .addNetworkInterceptor { chain ->
+                    val req = chain.request()
+                    val host = req.url.host.lowercase()
+                    val isGitHubDomain = host == "github.com" ||
+                        host.endsWith(".github.com") ||
+                        host.endsWith(".githubusercontent.com")
+                    val cleanReq = if (!isGitHubDomain) {
+                        // Strip Authorization & GitHub headers on external 302 redirects (e.g., Azure Blob Storage)
+                        req.newBuilder()
+                            .removeHeader("Authorization")
+                            .removeHeader("X-GitHub-Api-Version")
+                            .build()
+                    } else {
+                        req
+                    }
+                    chain.proceed(cleanReq)
+                }
+                .followRedirects(true)
+                .followSslRedirects(true)
                 .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .writeTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(180, TimeUnit.SECONDS)
+                .writeTimeout(180, TimeUnit.SECONDS)
+                .build()
+        }
 
+        fun create(
+            baseUrl: String = DEFAULT_BASE_URL,
+            dbHelper: AppDatabaseHelper? = null
+        ): GitHubApiService {
             val safeBaseUrl = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
 
             return Retrofit.Builder()
                 .baseUrl(safeBaseUrl)
-                .client(clientBuilder.build())
+                .client(buildOkHttpClient(dbHelper))
                 .addConverterFactory(GsonConverterFactory.create())
                 .build()
                 .create(GitHubApiService::class.java)

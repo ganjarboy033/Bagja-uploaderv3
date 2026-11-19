@@ -7,19 +7,20 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
-import com.example.xiyu.data.repository.GitHubRepository
 import com.example.xiyu.ui.components.LocalToastController
 import com.example.xiyu.ui.components.ToastController
 import com.example.xiyu.ui.components.ToastHost
@@ -28,19 +29,18 @@ import com.example.xiyu.ui.navigation.Screen
 import com.example.xiyu.ui.screens.*
 import com.example.xiyu.ui.theme.XIYUUploaderTheme
 import com.example.xiyu.util.OAuthHelper
+import com.example.xiyu.viewmodel.AppStateViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var repository: GitHubRepository
+    private val appViewModel: AppStateViewModel by viewModels()
     private val pendingDeepLink = MutableStateFlow<Uri?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        repository = GitHubRepository(applicationContext)
 
         intent?.data?.let { uri ->
             handleDeepLink(uri)
@@ -48,26 +48,36 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             XIYUUploaderTheme {
-                val context = LocalContext.current
+                val repository = appViewModel.repository
                 val currentUser by repository.currentUser.collectAsState()
                 val rateLimit by repository.rateLimit.collectAsState()
+                val downloads by appViewModel.downloads.collectAsState()
                 val incomingUri by pendingDeepLink.collectAsState()
+
                 val snackbarHostState = remember { SnackbarHostState() }
                 val toastController = remember { ToastController() }
+                val saveableStateHolder = rememberSaveableStateHolder()
 
                 var currentScreen by remember { mutableStateOf<Screen>(Screen.Home) }
 
-                // Automatically navigate to Dashboard on successful login
+                // Clean CI/CD artifact cache when leaving CI/CD Monitor tab
+                LaunchedEffect(currentScreen) {
+                    if (currentScreen != Screen.CiCdMonitor) {
+                        appViewModel.clearCiCdCache()
+                    }
+                }
+
                 LaunchedEffect(incomingUri) {
                     incomingUri?.let { uri ->
                         processOAuthRedirect(uri, toastController) {
+                            appViewModel.refreshDashboard()
+                            appViewModel.refreshExplorerRepos(resetPath = false)
                             currentScreen = Screen.Dashboard
                         }
                         pendingDeepLink.value = null
                     }
                 }
 
-                // Handle system back navigation
                 if (currentScreen != Screen.Home) {
                     BackHandler {
                         currentScreen = Screen.Home
@@ -77,65 +87,84 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(LocalToastController provides toastController) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         Scaffold(
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .navigationBarsPadding(),
                             snackbarHost = { SnackbarHost(snackbarHostState) },
                             topBar = {
                                 Topbar(
                                     currentUser = currentUser,
                                     rateLimit = rateLimit,
                                     currentScreen = currentScreen.route,
+                                    downloadsCount = downloads.size,
                                     onNavigate = { screen ->
                                         currentScreen = screen
                                     }
                                 )
                             }
                         ) { innerPadding ->
-                            when (currentScreen) {
-                                Screen.Home -> HomeScreen(
-                                    currentUser = currentUser,
-                                    onNavigate = { currentScreen = it },
-                                    modifier = Modifier.padding(innerPadding)
-                                )
-                                Screen.Dashboard -> DashboardScreen(
-                                    repository = repository,
-                                    currentUser = currentUser,
-                                    onNavigate = { currentScreen = it },
-                                    modifier = Modifier.padding(innerPadding)
-                                )
-                                Screen.RepoExplorer -> RepoExplorerScreen(
-                                    repository = repository,
-                                    currentUser = currentUser,
-                                    onNavigate = { currentScreen = it },
-                                    modifier = Modifier.padding(innerPadding)
-                                )
-                                Screen.WorkflowRelease -> WorkflowReleaseScreen(
-                                    repository = repository,
-                                    currentUser = currentUser,
-                                    onNavigate = { currentScreen = it },
-                                    modifier = Modifier.padding(innerPadding)
-                                )
-                                Screen.Upload -> UploadScreen(
-                                    repository = repository,
-                                    currentUser = currentUser,
-                                    onNavigate = { currentScreen = it },
-                                    modifier = Modifier.padding(innerPadding)
-                                )
-                                Screen.Login -> LoginScreen(
-                                    repository = repository,
-                                    currentUser = currentUser,
-                                    onNavigate = { currentScreen = it },
-                                    modifier = Modifier.padding(innerPadding)
-                                )
-                                Screen.DebugPanel -> DebugPanelScreen(
-                                    repository = repository,
-                                    currentUser = currentUser,
-                                    onNavigate = { currentScreen = it },
-                                    modifier = Modifier.padding(innerPadding)
-                                )
+                            // Zero-reset navigation: saveable state + persistent AppStateViewModel
+                            saveableStateHolder.SaveableStateProvider(key = currentScreen.route) {
+                                when (currentScreen) {
+                                    Screen.Home -> HomeScreen(
+                                        currentUser = currentUser,
+                                        onNavigate = { currentScreen = it },
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                    Screen.Dashboard -> DashboardScreen(
+                                        appViewModel = appViewModel,
+                                        currentUser = currentUser,
+                                        onNavigate = { currentScreen = it },
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                    Screen.RepoExplorer -> RepoExplorerScreen(
+                                        appViewModel = appViewModel,
+                                        currentUser = currentUser,
+                                        onNavigate = { currentScreen = it },
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                    Screen.WorkflowRelease -> WorkflowReleaseScreen(
+                                        appViewModel = appViewModel,
+                                        currentUser = currentUser,
+                                        onNavigate = { currentScreen = it },
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                    Screen.CiCdMonitor -> CiCdMonitorScreen(
+                                        appViewModel = appViewModel,
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                    Screen.Upload -> UploadScreen(
+                                        appViewModel = appViewModel,
+                                        currentUser = currentUser,
+                                        onNavigate = { currentScreen = it },
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                    Screen.Downloads -> DownloadsScreen(
+                                        appViewModel = appViewModel,
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                    Screen.Login -> LoginScreen(
+                                        repository = repository,
+                                        currentUser = currentUser,
+                                        onNavigate = { target ->
+                                            if (target == Screen.Dashboard) {
+                                                appViewModel.refreshDashboard()
+                                                appViewModel.refreshExplorerRepos(resetPath = false)
+                                            }
+                                            currentScreen = target
+                                        },
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                    Screen.DebugPanel -> DebugPanelScreen(
+                                        repository = repository,
+                                        currentUser = currentUser,
+                                        onNavigate = { currentScreen = it },
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                }
                             }
                         }
 
-                        // Floating dynamic toast host on top of content
                         ToastHost(
                             controller = toastController,
                             modifier = Modifier
@@ -178,7 +207,7 @@ class MainActivity : ComponentActivity() {
 
         if (!accessToken.isNullOrBlank()) {
             lifecycleScope.launch {
-                repository.loginWithToken(accessToken, isOAuth = true).fold(
+                appViewModel.repository.loginWithToken(accessToken, isOAuth = true).fold(
                     onSuccess = { profile ->
                         toastController.showSuccess("Berhasil masuk sebagai @${profile.login} via Chrome!")
                         onSuccess()
@@ -199,7 +228,7 @@ class MainActivity : ComponentActivity() {
                 toastController.showInfo("Menukarkan kode otorisasi GitHub...", isLoading = true)
                 OAuthHelper.exchangeCodeForToken(clientId, clientSecret, code).fold(
                     onSuccess = { token ->
-                        repository.loginWithToken(token, isOAuth = true).fold(
+                        appViewModel.repository.loginWithToken(token, isOAuth = true).fold(
                             onSuccess = { profile ->
                                 toastController.showSuccess("Berhasil masuk sebagai @${profile.login} via Chrome!")
                                 onSuccess()
