@@ -26,6 +26,7 @@ object FolderImporter {
         stagingDir: File,
         removeGit: Boolean = false,
         includeParentFolder: Boolean = false,
+        smartGitignore: Boolean = false,
         onProgress: (fileCount: Int, currentPath: String, cumulativeBytes: Long) -> Unit = { _, _, _ -> }
     ): FolderImportResult {
         if (!stagingDir.exists()) stagingDir.mkdirs()
@@ -39,6 +40,7 @@ object FolderImporter {
         var cumulativeBytes = 0L
         var fileIndex = 0
         val buffer = ByteArray(8192)
+        var parsedGitignore = SmartGitignoreFilter.ParsedRules()
 
         fun traverse(parentDocId: String, relativeDirPrefix: String) {
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
@@ -64,7 +66,7 @@ object FolderImporter {
                         ZipExtractor.cleanPath("$relativeDirPrefix/$childName")
                     }
 
-                    if (ZipExtractor.shouldSkip(relPath, removeGit)) {
+                    if (ZipExtractor.shouldSkip(relPath, removeGit, smartGitignore, parsedGitignore)) {
                         continue
                     }
 
@@ -102,6 +104,12 @@ object FolderImporter {
                             }
                         }
 
+                        if (smartGitignore && childName.equals(".gitignore", ignoreCase = true) && fileTotal <= 256 * 1024) {
+                            runCatching {
+                                parsedGitignore = SmartGitignoreFilter.parseGitignoreText(stagedFile.readText())
+                            }
+                        }
+
                         val finalPath = if (includeParentFolder) "$rootFolderName/$relPath" else relPath
                         entries.add(
                             FileEntry(
@@ -121,10 +129,22 @@ object FolderImporter {
 
         traverse(rootDocId, "")
 
+        val filteredEntries = if (smartGitignore && (parsedGitignore.directoryNames.isNotEmpty() || parsedGitignore.exactNames.isNotEmpty() || parsedGitignore.extensions.isNotEmpty())) {
+            entries.filterNot { entry ->
+                val skip = SmartGitignoreFilter.shouldIgnore(entry.rawRelativePath, true, parsedGitignore)
+                if (skip && !entry.localStagingPath.isNullOrBlank()) {
+                    runCatching { File(entry.localStagingPath).delete() }
+                }
+                skip
+            }
+        } else {
+            entries
+        }
+
         return FolderImportResult(
             folderName = rootFolderName,
-            entries = entries,
-            totalBytes = cumulativeBytes
+            entries = filteredEntries,
+            totalBytes = filteredEntries.sumOf { it.size }
         )
     }
 

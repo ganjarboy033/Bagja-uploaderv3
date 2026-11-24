@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -27,6 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -45,11 +47,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.net.URL
 
 enum class SourceMode {
     ARCHIVE, SAMPLE, LINK, PASTE
 }
+
+private data class PendingImportBatch(
+    val entries: List<FileEntry>,
+    val archiveName: String?,
+    val folderName: String?,
+    val sourceModeName: String?,
+    val conflictingPaths: List<String>
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,11 +70,13 @@ fun UploadScreen(
     onNavigate: (Screen) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalKruzenPalette.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
     val toastController = LocalToastController.current
 
+    val appConfig by appViewModel.repository.dbHelper.configState.collectAsState()
     val state by appViewModel.uploaderState.collectAsState()
     val sourceMode = remember(state.sourceModeName) {
         runCatching { SourceMode.valueOf(state.sourceModeName) }.getOrDefault(SourceMode.ARCHIVE)
@@ -79,9 +92,11 @@ fun UploadScreen(
     var pastePath by remember { mutableStateOf("README.md") }
     var pasteContent by remember { mutableStateOf("# kruzenlab-uploader Project\n\nUploaded via kruzenlab-uploader by DEV BAGJA / KruzenLab ⚡\n") }
 
-    // Staged file inspection / editing
-    var stagedEntryToEdit by remember { mutableStateOf<FileEntry?>(null) }
+    // Staged file inspection / editing (bytes loaded asynchronously on Dispatchers.IO)
+    var stagedEditorPayload by remember { mutableStateOf<Pair<FileEntry, ByteArray>?>(null) }
     var largeBinaryEntryToInspect by remember { mutableStateOf<FileEntry?>(null) }
+    var pendingConflictBatch by remember { mutableStateOf<PendingImportBatch?>(null) }
+    var entryPendingReplacePath by remember { mutableStateOf<String?>(null) }
     var showCommitConfirmDialog by remember { mutableStateOf(false) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -107,6 +122,63 @@ fun UploadScreen(
         if (state.searchFilter.isBlank()) state.entries
         else state.entries.filter { it.path.contains(state.searchFilter, ignoreCase = true) }
     }
+    val groupedVisibleEntries = remember(visibleEntries) {
+        visibleEntries.groupBy { it.path.substringBeforeLast('/', "") }
+    }
+
+    fun openStagedEntryAsync(entry: FileEntry) {
+        if (entry.size > 6L * 1024L * 1024L) {
+            largeBinaryEntryToInspect = entry
+            return
+        }
+        scope.launch {
+            val loadedBytes = withContext(Dispatchers.IO) {
+                val stagingPath = entry.localStagingPath
+                if (!stagingPath.isNullOrBlank() && File(stagingPath).exists()) {
+                    try {
+                        File(stagingPath).readBytes()
+                    } catch (_: Exception) {
+                        ByteArray(0)
+                    }
+                } else {
+                    try {
+                        Base64.decode(entry.contentBase64, Base64.DEFAULT)
+                    } catch (_: Exception) {
+                        entry.contentBase64.toByteArray(Charsets.UTF_8)
+                    }
+                }
+            }
+            stagedEditorPayload = entry to loadedBytes
+        }
+    }
+
+    fun handleIncomingBatch(
+        incoming: List<FileEntry>,
+        archiveLabel: String?,
+        folderLabel: String?,
+        sourceModeName: String?
+    ) {
+        val existingPaths = state.entries.map { it.path }.toSet()
+        val conflicts = incoming.map { it.path }.filter { existingPaths.contains(it) }
+        if (conflicts.isNotEmpty()) {
+            pendingConflictBatch = PendingImportBatch(
+                entries = incoming,
+                archiveName = archiveLabel,
+                folderName = folderLabel,
+                sourceModeName = sourceModeName,
+                conflictingPaths = conflicts
+            )
+        } else {
+            val (added, _) = appViewModel.applyStagedEntriesMerge(
+                incoming = incoming,
+                replaceConflicts = false,
+                archiveName = archiveLabel,
+                folderName = folderLabel,
+                sourceModeName = sourceModeName
+            )
+            toastController.showSuccess("$added berkas ditambahkan ke staging (total ${state.entries.size + added} berkas)")
+        }
+    }
 
     fun resolveDisplayName(uri: Uri): String {
         var name: String? = null
@@ -119,6 +191,53 @@ fun UploadScreen(
             }
         } catch (_: Exception) {}
         return name ?: uri.lastPathSegment?.substringAfterLast('/') ?: "project.zip"
+    }
+
+    val replaceSingleFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        val targetPath = entryPendingReplacePath
+        entryPendingReplacePath = null
+        if (uri != null && targetPath != null) {
+            scope.launch {
+                try {
+                    val replaced = withContext(Dispatchers.IO) {
+                        val stagingDir = File(
+                            appViewModel.repository.getIntakeStagingDir(),
+                            "rep_${System.currentTimeMillis()}"
+                        ).apply { mkdirs() }
+                        val outFile = File(stagingDir, "replaced.bin")
+                        var total = 0L
+                        context.contentResolver.openInputStream(uri)?.use { inp ->
+                            FileOutputStream(outFile).use { fos ->
+                                val buf = ByteArray(8192)
+                                var r: Int
+                                while (inp.read(buf).also { r = it } != -1) {
+                                    total += r
+                                    if (total > ZipExtractor.MAX_FILE_BYTES) {
+                                        outFile.delete()
+                                        throw IllegalStateException("Ukuran file pengganti melebihi batas 100 MB.")
+                                    }
+                                    fos.write(buf, 0, r)
+                                }
+                            }
+                        } ?: throw IllegalStateException("Tidak dapat membaca berkas pengganti")
+                        FileEntry(
+                            path = targetPath,
+                            contentBase64 = "",
+                            size = total,
+                            isSelected = true,
+                            rawRelativePath = targetPath,
+                            localStagingPath = outFile.absolutePath
+                        )
+                    }
+                    appViewModel.applyStagedEntriesMerge(listOf(replaced), replaceConflicts = true)
+                    toastController.showSuccess("Berkas $targetPath berhasil diganti!")
+                } catch (e: Exception) {
+                    toastController.showError("Gagal mengganti file: ${e.localizedMessage}")
+                }
+            }
+        }
     }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -140,7 +259,10 @@ fun UploadScreen(
             scope.launch {
                 try {
                     val loaded = withContext(Dispatchers.IO) {
-                        val stagingDir = appViewModel.repository.resetIntakeStagingDir()
+                        val stagingDir = File(
+                            appViewModel.repository.getIntakeStagingDir(),
+                            "imp_${System.currentTimeMillis()}"
+                        ).apply { mkdirs() }
                         val input = context.contentResolver.openInputStream(uri)
                             ?: throw IllegalStateException("Tidak dapat membaca berkas")
                         input.use { stream ->
@@ -151,25 +273,22 @@ fun UploadScreen(
                                     }
                                 )
                             } else {
-                                ZipExtractor.extractZipToStaging(stream, stagingDir, state.removeGitFolders) { count, path, totalBytes ->
+                                ZipExtractor.extractZipToStaging(
+                                    inputStream = stream,
+                                    stagingDir = stagingDir,
+                                    removeGit = state.removeGitFolders,
+                                    smartGitignore = appConfig.enableSmartGitignore
+                                ) { count, path, totalBytes ->
                                     intakeProgressText = "$count berkas (${ZipExtractor.formatSize(totalBytes)}): $path"
                                 }
                             }
                         }
                     }
-                    val totalSize = loaded.sumOf { it.size }
-                    appViewModel.updateUploader {
-                        it.copy(
-                            entries = loaded,
-                            archiveName = displayName,
-                            selectedFolderName = null,
-                            includeParentFolderInPath = false,
-                            totalStagedBytes = totalSize
-                        )
-                    }
-                    toastController.showSuccess(
-                        if (rawMode) "$displayName siap di-push (${ZipExtractor.formatSize(totalSize)})!"
-                        else "$displayName diekstrak (${loaded.size} files · ${ZipExtractor.formatSize(totalSize)})"
+                    handleIncomingBatch(
+                        incoming = loaded,
+                        archiveLabel = displayName,
+                        folderLabel = null,
+                        sourceModeName = SourceMode.ARCHIVE.name
                     )
                 } catch (e: Exception) {
                     toastController.showError("Gagal memuat arsip: ${e.localizedMessage}")
@@ -192,27 +311,26 @@ fun UploadScreen(
             scope.launch {
                 try {
                     val result = withContext(Dispatchers.IO) {
-                        val stagingDir = appViewModel.repository.resetIntakeStagingDir()
+                        val stagingDir = File(
+                            appViewModel.repository.getIntakeStagingDir(),
+                            "dir_${System.currentTimeMillis()}"
+                        ).apply { mkdirs() }
                         FolderImporter.importFolderToStaging(
                             context = context,
                             treeUri = treeUri,
                             stagingDir = stagingDir,
                             removeGit = state.removeGitFolders,
-                            includeParentFolder = state.includeParentFolderInPath
+                            includeParentFolder = state.includeParentFolderInPath,
+                            smartGitignore = appConfig.enableSmartGitignore
                         ) { count, relPath, cumulativeBytes ->
                             intakeProgressText = "$count file (${ZipExtractor.formatSize(cumulativeBytes)}): $relPath"
                         }
                     }
-                    appViewModel.updateUploader {
-                        it.copy(
-                            entries = result.entries,
-                            archiveName = "Folder: ${result.folderName}",
-                            selectedFolderName = result.folderName,
-                            totalStagedBytes = result.totalBytes
-                        )
-                    }
-                    toastController.showSuccess(
-                        "Folder \"${result.folderName}\" siap (${result.entries.size} files · ${ZipExtractor.formatSize(result.totalBytes)})"
+                    handleIncomingBatch(
+                        incoming = result.entries,
+                        archiveLabel = "Folder: ${result.folderName}",
+                        folderLabel = result.folderName,
+                        sourceModeName = SourceMode.ARCHIVE.name
                     )
                 } catch (e: Exception) {
                     toastController.showError("Gagal memuat folder: ${e.localizedMessage}")
@@ -282,7 +400,7 @@ fun UploadScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(BrandCream)
+            .background(palette.cream)
             .verticalScroll(scrollState)
             .padding(horizontal = 20.dp, vertical = 16.dp)
             .testTag("upload_screen")
@@ -297,18 +415,18 @@ fun UploadScreen(
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "Back",
-                tint = BrandRose,
+                tint = palette.rose,
                 modifier = Modifier.size(16.dp)
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(text = "Kembali ke Dashboard", fontSize = 12.sp, color = BrandTextMuted)
+            Text(text = "Kembali ke Dashboard", fontSize = 12.sp, color = palette.textMuted)
         }
 
         Text(
             text = "KRUZENLAB BATCH UPLOADER ⚡",
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
-            color = BrandRose,
+            color = palette.rose,
             letterSpacing = 1.6.sp
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -317,17 +435,17 @@ fun UploadScreen(
             fontFamily = FontFamily.SansSerif,
             fontWeight = FontWeight.Bold,
             fontSize = 28.sp,
-            color = BrandDark
+            color = palette.dark
         )
-        ThinHighlightText("Persisten antar-tab, mendukung background WorkManager (WakeLock) & mode ZIP utuh/ekstrak.")
+        ThinHighlightText("Multi-import akumulatif · Smart .gitignore (${if (appConfig.enableSmartGitignore) "ON" else "OFF"}) · WorkManager WakeLock.", color = palette.textMuted)
 
         Spacer(modifier = Modifier.height(16.dp))
 
         // Intake Source Card
         Surface(
             shape = RoundedCornerShape(24.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-            color = BrandCardBg,
+            border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+            color = palette.cardBg,
             shadowElevation = 2.dp,
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -547,18 +665,14 @@ fun UploadScreen(
                                         createEntry("docs/architecture.md", "# KruzenLab Cloud Architecture\n\nAtomic Git tree commit engine by DEV BAGJA.\n"),
                                         createEntry("README.md", "# kruzenlab-uploader\n\nCloud Repository Manager & Batch Uploader.\n")
                                     )
-                                    appViewModel.updateUploader {
-                                        it.copy(
-                                            entries = sampleList,
-                                            archiveName = "kruzenlab-starter.zip",
-                                            selectedFolderName = null,
-                                            includeParentFolderInPath = false,
-                                            totalStagedBytes = sampleList.sumOf { e -> e.size }
-                                        )
-                                    }
-                                    toastController.showSuccess("Sample project + workflow if:always() dimuat ke staging")
+                                    handleIncomingBatch(
+                                        incoming = sampleList,
+                                        archiveLabel = "kruzenlab-starter.zip",
+                                        folderLabel = null,
+                                        sourceModeName = SourceMode.SAMPLE.name
+                                    )
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = BrandDark),
+                                colors = ButtonDefaults.buttonColors(containerColor = palette.dark, contentColor = palette.cream),
                                 shape = RoundedCornerShape(20.dp),
                                 modifier = Modifier.testTag("load_sample_project_btn")
                             ) {
@@ -573,7 +687,7 @@ fun UploadScreen(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(BrandCream.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                                .background(palette.cream.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
                                 .padding(16.dp)
                         ) {
                             OutlinedTextField(
@@ -600,15 +714,17 @@ fun UploadScreen(
                                     if (pastePath.isNotBlank()) {
                                         val clean = ZipExtractor.cleanPath(pastePath)
                                         val newEntry = createEntry(clean, pasteContent)
-                                        appViewModel.updateUploader { cur ->
-                                            cur.copy(entries = cur.entries.filter { it.path != clean } + newEntry)
-                                        }
+                                        handleIncomingBatch(
+                                            incoming = listOf(newEntry),
+                                            archiveLabel = null,
+                                            folderLabel = null,
+                                            sourceModeName = SourceMode.PASTE.name
+                                        )
                                         pastePath = ""
                                         pasteContent = ""
-                                        toastController.showSuccess("File ditambahkan ke staging!")
                                     }
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = BrandDark),
+                                colors = ButtonDefaults.buttonColors(containerColor = palette.dark, contentColor = palette.cream),
                                 shape = RoundedCornerShape(20.dp),
                                 modifier = Modifier.testTag("add_pasted_file_btn")
                             ) {
@@ -621,7 +737,7 @@ fun UploadScreen(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(BrandCream.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                                .background(palette.cream.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
                                 .padding(16.dp)
                         ) {
                             OutlinedTextField(
@@ -645,25 +761,29 @@ fun UploadScreen(
                                             try {
                                                 val fileName = linkUrl.substringAfterLast("/").ifBlank { "archive.zip" }
                                                 val loaded = withContext(Dispatchers.IO) {
-                                                    val stagingDir = appViewModel.repository.resetIntakeStagingDir()
+                                                    val stagingDir = File(
+                                                        appViewModel.repository.getIntakeStagingDir(),
+                                                        "url_${System.currentTimeMillis()}"
+                                                    ).apply { mkdirs() }
                                                     URL(linkUrl).openStream().use { stream ->
                                                         if (rawMode) {
                                                             listOf(ZipExtractor.readRawToStaging(stream, fileName, stagingDir))
                                                         } else {
-                                                            ZipExtractor.extractZipToStaging(stream, stagingDir, state.removeGitFolders)
+                                                            ZipExtractor.extractZipToStaging(
+                                                                inputStream = stream,
+                                                                stagingDir = stagingDir,
+                                                                removeGit = state.removeGitFolders,
+                                                                smartGitignore = appConfig.enableSmartGitignore
+                                                            )
                                                         }
                                                     }
                                                 }
-                                                appViewModel.updateUploader {
-                                                    it.copy(
-                                                        entries = loaded,
-                                                        archiveName = fileName,
-                                                        selectedFolderName = null,
-                                                        includeParentFolderInPath = false,
-                                                        totalStagedBytes = loaded.sumOf { e -> e.size }
-                                                    )
-                                                }
-                                                toastController.showSuccess("Arsip diunduh (${loaded.size} item)")
+                                                handleIncomingBatch(
+                                                    incoming = loaded,
+                                                    archiveLabel = fileName,
+                                                    folderLabel = null,
+                                                    sourceModeName = SourceMode.LINK.name
+                                                )
                                             } catch (e: Exception) {
                                                 toastController.showError("Gagal download: ${e.localizedMessage}")
                                             } finally {
@@ -674,7 +794,7 @@ fun UploadScreen(
                                     }
                                 },
                                 enabled = !isExtracting && linkUrl.isNotBlank(),
-                                colors = ButtonDefaults.buttonColors(containerColor = BrandDark),
+                                colors = ButtonDefaults.buttonColors(containerColor = palette.dark, contentColor = palette.cream),
                                 shape = RoundedCornerShape(20.dp),
                                 modifier = Modifier.testTag("fetch_link_btn")
                             ) {
@@ -688,12 +808,12 @@ fun UploadScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Files to push Section (Tap item to inspect/edit with UniversalFileEditorDialog)
+        // Files to push Section (Hierarchical Folder/File Checkboxes, Bulk Actions & Async Editor)
         if (state.entries.isNotEmpty()) {
             Surface(
                 shape = RoundedCornerShape(24.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-                color = BrandCardBg,
+                border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                color = palette.cardBg,
                 shadowElevation = 2.dp,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -712,15 +832,50 @@ fun UploadScreen(
                                 text = "Files to push — ${chosenEntries.size} dari ${state.entries.size} (${ZipExtractor.formatSize(chosenTotalBytes)})",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp,
-                                color = BrandDark
+                                color = palette.dark
                             )
-                            ThinHighlightText("Ketuk baris file untuk buka di Editor / Inspektur Arsip")
+                            ThinHighlightText("Ketuk file untuk edit (async IO), atau centang folder/file untuk aksi massal.", color = palette.textMuted)
                         }
-                        Icon(
-                            imageVector = if (state.isFilesExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = null,
-                            tint = BrandRose
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = {
+                                    appViewModel.clearAllStagedEntries()
+                                    toastController.showSuccess("Staging dibersihkan")
+                                },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("Reset Staging", fontSize = 10.sp, color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                            }
+                            Icon(
+                                imageVector = if (state.isFilesExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = palette.rose
+                            )
+                        }
+                    }
+
+                    // Classic PAT Advisory Banner when > 1,000 files staged
+                    if (state.entries.size > 1000) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = palette.palePink,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, palette.rose.copy(alpha = 0.6f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Icon(Icons.Default.WarningAmber, contentDescription = null, tint = palette.rose, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                ThinHighlightText(
+                                    text = "Terdeteksi ${state.entries.size} berkas (>1.000). Disarankan memakai Classic PAT (ghp_..., No Expiration) & Rate Limit Pacer ON agar tidak terputus HTTP 401/403.",
+                                    fontSize = 10.sp,
+                                    color = palette.dark
+                                )
+                            }
+                        }
                     }
 
                     if (state.isFilesExpanded) {
@@ -731,20 +886,26 @@ fun UploadScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                TextButton(onClick = {
-                                    appViewModel.updateUploader { cur ->
-                                        cur.copy(entries = cur.entries.map { it.copy(isSelected = true) })
-                                    }
-                                }) {
-                                    Text("Pilih Semua", fontSize = 11.sp, color = BrandRose)
+                            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                TextButton(
+                                    onClick = {
+                                        appViewModel.updateUploader { cur ->
+                                            cur.copy(entries = cur.entries.map { it.copy(isSelected = true) })
+                                        }
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Pilih Semua", fontSize = 11.sp, color = palette.rose, maxLines = 1, softWrap = false)
                                 }
-                                TextButton(onClick = {
-                                    appViewModel.updateUploader { cur ->
-                                        cur.copy(entries = cur.entries.map { it.copy(isSelected = false) })
-                                    }
-                                }) {
-                                    Text("Bersihkan", fontSize = 11.sp, color = BrandTextMuted)
+                                TextButton(
+                                    onClick = {
+                                        appViewModel.updateUploader { cur ->
+                                            cur.copy(entries = cur.entries.map { it.copy(isSelected = false) })
+                                        }
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Bersihkan", fontSize = 11.sp, color = palette.textMuted, maxLines = 1, softWrap = false)
                                 }
                             }
 
@@ -754,8 +915,63 @@ fun UploadScreen(
                                 placeholder = { Text("Cari file...", fontSize = 11.sp) },
                                 singleLine = true,
                                 shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier.width(140.dp)
+                                modifier = Modifier.width(135.dp)
                             )
+                        }
+
+                        // Bulk action bar for selected staging items
+                        if (chosenEntries.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        val removed = appViewModel.removeSelectedStagedEntries()
+                                        toastController.showSuccess("$removed berkas dihapus dari staging")
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Icon(Icons.Default.DeleteSweep, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Hapus Terpilih (${chosenEntries.size})", fontSize = 10.sp, color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        val target = chosenEntries.first()
+                                        openStagedEntryAsync(target)
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Icon(Icons.Default.Edit, null, tint = palette.dark, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Edit File", fontSize = 10.sp, color = palette.dark, maxLines = 1, softWrap = false)
+                                }
+
+                                if (chosenEntries.size == 1) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            entryPendingReplacePath = chosenEntries.first().path
+                                            replaceSingleFileLauncher.launch(arrayOf("*/*"))
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(32.dp)
+                                    ) {
+                                        Icon(Icons.Default.SwapHoriz, null, tint = palette.rose, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Ganti File", fontSize = 10.sp, color = palette.dark, maxLines = 1, softWrap = false)
+                                    }
+                                }
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -763,54 +979,81 @@ fun UploadScreen(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 240.dp)
+                                .heightIn(max = 260.dp)
                                 .verticalScroll(rememberScrollState())
-                                .background(BrandCream.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                                .background(palette.cream.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
                                 .padding(8.dp)
                         ) {
-                            visibleEntries.forEach { entry ->
+                            groupedVisibleEntries.forEach { (folderKey, entriesInFolder) ->
+                                val allFolderSelected = entriesInFolder.all { it.isSelected }
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .background(palette.palePink.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
                                         .clickable {
-                                            if (entry.size > 6L * 1024L * 1024L) {
-                                                largeBinaryEntryToInspect = entry
-                                            } else {
-                                                stagedEntryToEdit = entry
-                                            }
+                                            appViewModel.toggleStagedFolderSelection(folderKey, !allFolderSelected)
                                         }
-                                        .padding(vertical = 4.dp, horizontal = 6.dp),
+                                        .padding(horizontal = 6.dp, vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Checkbox(
-                                        checked = entry.isSelected,
+                                        checked = allFolderSelected,
                                         onCheckedChange = { checked ->
-                                            appViewModel.updateUploader { cur ->
-                                                cur.copy(entries = cur.entries.map {
-                                                    if (it.path == entry.path) it.copy(isSelected = checked) else it
-                                                })
-                                            }
+                                            appViewModel.toggleStagedFolderSelection(folderKey, checked)
                                         },
-                                        modifier = Modifier.size(22.dp)
+                                        modifier = Modifier.size(20.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = entry.path,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 11.sp,
-                                        color = BrandDark,
-                                        modifier = Modifier.weight(1f),
-                                        maxLines = 1
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = ZipExtractor.formatSize(entry.size),
-                                        fontSize = 10.sp,
-                                        color = BrandTextMuted
-                                    )
+                                    Icon(Icons.Default.Folder, contentDescription = null, tint = palette.rose, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(Icons.Default.Edit, contentDescription = "Inspect", tint = BrandRose, modifier = Modifier.size(14.dp))
+                                    Text(
+                                        text = if (folderKey.isEmpty()) "(root)" else "$folderKey/",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.dark,
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text("${entriesInFolder.size}", fontSize = 10.sp, color = palette.textMuted)
                                 }
+
+                                entriesInFolder.forEach { entry ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { openStagedEntryAsync(entry) }
+                                            .padding(start = 18.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Checkbox(
+                                            checked = entry.isSelected,
+                                            onCheckedChange = { checked ->
+                                                appViewModel.toggleStagedEntrySelection(entry.path, checked)
+                                            },
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = entry.path.substringAfterLast('/'),
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 11.sp,
+                                            color = palette.dark,
+                                            modifier = Modifier.weight(1f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = ZipExtractor.formatSize(entry.size),
+                                            fontSize = 10.sp,
+                                            color = palette.textMuted
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(Icons.Default.Edit, contentDescription = "Inspect", tint = palette.rose, modifier = Modifier.size(14.dp))
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
                             }
                         }
                     }
@@ -822,13 +1065,13 @@ fun UploadScreen(
         // Repository Target Configuration
         Surface(
             shape = RoundedCornerShape(24.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-            color = BrandCardBg,
+            border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+            color = palette.cardBg,
             shadowElevation = 2.dp,
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(18.dp)) {
-                Text("Konfigurasi Repositori Target", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = BrandDark)
+                Text("Konfigurasi Repositori Target", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = palette.dark)
                 ThinHighlightText("Mendukung auto-init pada repositori baru & checkpoint resumable SQLite.")
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -1142,53 +1385,116 @@ fun UploadScreen(
         AttributionFooter()
     }
 
-    // Universal Editor for staged file (<= 6 MB) before pushing
-    if (stagedEntryToEdit != null) {
-        val target = stagedEntryToEdit!!
-        val initialBytes = remember(target) {
-            val stagingPath = target.localStagingPath
-            if (!stagingPath.isNullOrBlank() && File(stagingPath).exists()) {
-                try {
-                    File(stagingPath).readBytes()
-                } catch (_: Exception) {
-                    ByteArray(0)
+    // Conflict Path Resolution Dialog for Accumulative Multi-Import
+    if (pendingConflictBatch != null) {
+        val batch = pendingConflictBatch!!
+        AlertDialog(
+            onDismissRequest = { pendingConflictBatch = null },
+            title = { Text("Konflik Path Ditemukan", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = palette.dark) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "${batch.conflictingPaths.size} berkas dari sumber baru memiliki path yang sudah ada di staging.",
+                        fontSize = 12.sp,
+                        color = palette.textDark
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 150.dp)
+                            .verticalScroll(rememberScrollState())
+                            .background(palette.cream, RoundedCornerShape(10.dp))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        batch.conflictingPaths.take(30).forEach { p ->
+                            Text(p, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = palette.rose, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    ThinHighlightText("Pilih apakah berkas yang bentrok akan ditimpa versi baru atau dilewati.", color = palette.textMuted)
                 }
-            } else {
-                try {
-                    Base64.decode(target.contentBase64, Base64.DEFAULT)
-                } catch (_: Exception) {
-                    target.contentBase64.toByteArray()
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingConflictBatch = null
+                        val (added, replaced) = appViewModel.applyStagedEntriesMerge(
+                            incoming = batch.entries,
+                            replaceConflicts = true,
+                            archiveName = batch.archiveName,
+                            folderName = batch.folderName,
+                            sourceModeName = batch.sourceModeName
+                        )
+                        toastController.showSuccess("+$added baru, $replaced ditimpa di staging!")
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.dark, contentColor = palette.cream)
+                ) {
+                    Text("Timpa (Replace)")
                 }
-            }
-        }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = { pendingConflictBatch = null }) {
+                        Text("Batal", color = palette.textMuted)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            pendingConflictBatch = null
+                            val (added, _) = appViewModel.applyStagedEntriesMerge(
+                                incoming = batch.entries,
+                                replaceConflicts = false,
+                                archiveName = batch.archiveName,
+                                folderName = batch.folderName,
+                                sourceModeName = batch.sourceModeName
+                            )
+                            toastController.showSuccess("+$added berkas baru ditambahkan (${batch.conflictingPaths.size} duplikat dilewati)")
+                        }
+                    ) {
+                        Text("Lewati Duplikat")
+                    }
+                }
+            },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = palette.cardBg
+        )
+    }
+
+    // Universal Editor for staged file (<= 6 MB) loaded asynchronously off Main Thread
+    if (stagedEditorPayload != null) {
+        val (target, initialBytes) = stagedEditorPayload!!
         UniversalFileEditorDialog(
             fileName = target.path.substringAfterLast('/'),
             filePath = "Staging/${target.path}",
             initialBytes = initialBytes,
             allowRemoteCommit = false,
-            onDismiss = { stagedEntryToEdit = null },
+            onDismiss = { stagedEditorPayload = null },
             onSaveBytes = { updatedBytes, _ ->
-                val stagingPath = target.localStagingPath
-                if (!stagingPath.isNullOrBlank()) {
-                    try {
-                        File(stagingPath).writeBytes(updatedBytes)
-                    } catch (_: Exception) {}
-                }
-                val encoded = if (stagingPath.isNullOrBlank()) {
-                    Base64.encodeToString(updatedBytes, Base64.NO_WRAP)
-                } else {
-                    ""
-                }
-                appViewModel.updateUploader { cur ->
-                    cur.copy(
-                        entries = cur.entries.map {
-                            if (it.path == target.path) it.copy(contentBase64 = encoded, size = updatedBytes.size.toLong())
-                            else it
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        val stagingPath = target.localStagingPath
+                        if (!stagingPath.isNullOrBlank()) {
+                            runCatching { File(stagingPath).writeBytes(updatedBytes) }
                         }
-                    )
+                    }
+                    val encoded = if (target.localStagingPath.isNullOrBlank()) {
+                        Base64.encodeToString(updatedBytes, Base64.NO_WRAP)
+                    } else {
+                        ""
+                    }
+                    appViewModel.updateUploader { cur ->
+                        cur.copy(
+                            entries = cur.entries.map {
+                                if (it.path == target.path) it.copy(contentBase64 = encoded, size = updatedBytes.size.toLong())
+                                else it
+                            },
+                            totalStagedBytes = cur.entries.sumOf {
+                                if (it.path == target.path) updatedBytes.size.toLong() else it.size
+                            }
+                        )
+                    }
+                    stagedEditorPayload = null
+                    toastController.showSuccess("Berkas staging ${target.path} diperbarui")
                 }
-                stagedEntryToEdit = null
-                toastController.showSuccess("Berkas staging ${target.path} diperbarui")
             }
         )
     }

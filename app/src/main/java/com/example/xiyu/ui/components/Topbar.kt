@@ -35,12 +35,14 @@ fun Topbar(
     onNavigate: (Screen) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalKruzenPalette.current
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .statusBarsPadding()
             .testTag("app_topbar"),
-        color = BrandCream.copy(alpha = 0.98f),
+        color = palette.cream.copy(alpha = 0.98f),
         tonalElevation = 2.dp
     ) {
         Column(
@@ -64,12 +66,12 @@ fun Topbar(
                         modifier = Modifier
                             .size(34.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(BrandDark),
+                            .background(palette.dark),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = "⚡",
-                            color = BrandCream,
+                            color = palette.cream,
                             fontSize = 16.sp
                         )
                     }
@@ -80,12 +82,12 @@ fun Topbar(
                             fontFamily = FontFamily.SansSerif,
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp,
-                            color = BrandDark
+                            color = palette.dark
                         )
                         ThinHighlightText(
                             text = "DEV BAGJA · KruzenLab",
                             fontSize = 10.sp,
-                            color = BrandRose
+                            color = palette.rose
                         )
                     }
                 }
@@ -95,8 +97,8 @@ fun Topbar(
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(BrandCardBg)
-                                .border(0.5.dp, BrandBorder, RoundedCornerShape(8.dp))
+                                .background(palette.cardBg)
+                                .border(0.5.dp, palette.border, RoundedCornerShape(8.dp))
                                 .padding(horizontal = 6.dp, vertical = 3.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -104,13 +106,13 @@ fun Topbar(
                                     text = "API: ",
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Light,
-                                    color = BrandRose
+                                    color = palette.rose
                                 )
                                 Text(
                                     text = "${rateLimit.remaining}/${rateLimit.limit}",
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (rateLimit.remaining < 500) MaterialTheme.colorScheme.error else BrandDark
+                                    color = if (rateLimit.remaining < 500) MaterialTheme.colorScheme.error else palette.dark
                                 )
                             }
                         }
@@ -125,7 +127,7 @@ fun Topbar(
                         Icon(
                             imageVector = Icons.Default.Tune,
                             contentDescription = "Settings & Debug",
-                            tint = if (currentScreen == Screen.DebugPanel.route) BrandDark else BrandRose,
+                            tint = if (currentScreen == Screen.DebugPanel.route) palette.dark else palette.rose,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -135,8 +137,8 @@ fun Topbar(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(16.dp))
-                                .border(1.dp, BrandBorder, RoundedCornerShape(16.dp))
-                                .background(BrandCardBg)
+                                .border(1.dp, palette.border, RoundedCornerShape(16.dp))
+                                .background(palette.cardBg)
                                 .clickable { onNavigate(Screen.Login) }
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                                 .testTag("user_profile_chip")
@@ -153,7 +155,7 @@ fun Topbar(
                                 Icon(
                                     imageVector = Icons.Default.AccountCircle,
                                     contentDescription = "User",
-                                    tint = BrandRose,
+                                    tint = palette.rose,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -162,7 +164,7 @@ fun Topbar(
                                 text = "@${currentUser.login}",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = BrandDark,
+                                color = palette.dark,
                                 maxLines = 1
                             )
                         }
@@ -177,7 +179,7 @@ fun Topbar(
                                 text = "Login",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = BrandDark
+                                color = palette.dark
                             )
                         }
                     }
@@ -264,15 +266,16 @@ private fun NavTab(
     testTag: String,
     modifier: Modifier = Modifier
 ) {
-    val bgColor = if (isSelected) BrandDark else BrandCardBg.copy(alpha = 0.8f)
-    val contentColor = if (isSelected) BrandCream else BrandDark
+    val palette = LocalKruzenPalette.current
+    val bgColor = if (isSelected) palette.dark else palette.cardBg.copy(alpha = 0.8f)
+    val contentColor = if (isSelected) palette.cream else palette.dark
     val borderStroke = if (isSelected) null else 1.dp
 
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(14.dp),
         color = bgColor,
-        border = if (borderStroke != null) androidx.compose.foundation.BorderStroke(borderStroke, BrandBorder) else null,
+        border = if (borderStroke != null) androidx.compose.foundation.BorderStroke(borderStroke, palette.border) else null,
         modifier = modifier
             .height(34.dp)
             .testTag(testTag)
@@ -285,7 +288,7 @@ private fun NavTab(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = if (isSelected) BrandAccent else BrandRose,
+                tint = if (isSelected) palette.accent else palette.rose,
                 modifier = Modifier.size(14.dp)
             )
             Spacer(modifier = Modifier.width(4.dp))

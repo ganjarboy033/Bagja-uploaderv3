@@ -8,6 +8,7 @@ import com.example.xiyu.data.api.GitHubApiService
 import com.example.xiyu.data.database.AppDatabaseHelper
 import com.example.xiyu.data.database.CommitRecord
 import com.example.xiyu.data.model.*
+import com.example.xiyu.util.NotificationHelper
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,6 +53,9 @@ class GitHubRepository(private val context: Context) {
 
     private val _rateLimit = MutableStateFlow<RateLimitInfo?>(null)
     val rateLimit: StateFlow<RateLimitInfo?> = _rateLimit.asStateFlow()
+
+    private val _authRevision = MutableStateFlow(0)
+    val authRevision: StateFlow<Int> = _authRevision.asStateFlow()
 
     init {
         val savedToken = prefs.getString("github_token", null)
@@ -128,6 +132,7 @@ class GitHubRepository(private val context: Context) {
             bio = "kruzenlab-uploader Demo Workspace ⚡"
         )
         _rateLimit.value = RateLimitInfo(limit = 5000, remaining = 4995, used = 5)
+        _authRevision.value = _authRevision.value + 1
         dbHelper.addInMemoryLog("DEMO", "/auth/demo", 200, 15, "Switched to KruzenLab Demo Workspace")
     }
 
@@ -177,10 +182,25 @@ class GitHubRepository(private val context: Context) {
             )
 
             fetchRateLimitInternal(cleanToken)
+            _authRevision.value = _authRevision.value + 1
             dbHelper.addInMemoryLog("AUTH", "/user", 200, 45, "User verified: @${profile.login}")
+            NotificationHelper.notifyActivity(
+                context,
+                title = "Akun Terhubung: @${profile.login}",
+                message = "Sesi GitHub aktif dan siap digunakan.",
+                targetRoute = "dashboard"
+            )
             Result.success(profile)
         } catch (e: Exception) {
             dbHelper.addInMemoryLog("AUTH", "/user", 401, 30, "Token verification failed: ${e.message}")
+            if (dbHelper.configState.value.enableLogErrorAdvisor) {
+                NotificationHelper.notifyError(
+                    context,
+                    title = "Autentikasi Gagal (401)",
+                    message = "Token ditolak GitHub. Ketuk untuk login ulang atau ganti ke Classic PAT.",
+                    targetRoute = "login"
+                )
+            }
             Result.failure(e)
         }
     }
@@ -202,7 +222,32 @@ class GitHubRepository(private val context: Context) {
         _currentUser.value = null
         _isDemoMode.value = false
         _rateLimit.value = null
+        _authRevision.value = _authRevision.value + 1
         dbHelper.addInMemoryLog("AUTH", "/logout", 200, 5, "Session disconnected")
+    }
+
+    /**
+     * Attempts to recover an active token from SharedPreferences or SQLite saved_accounts
+     * if a transient HTTP 401 occurs before forcing re-login.
+     */
+    fun tryRehydrateTokenFromSavedAccounts(): String? {
+        val currentLogin = _currentUser.value?.login
+        val fromPrefs = prefs.getString("github_token", null)
+        if (!fromPrefs.isNullOrBlank() && fromPrefs != _token.value) {
+            _token.value = fromPrefs
+            return fromPrefs
+        }
+        val matchingAccount = dbHelper.savedAccounts.value.firstOrNull {
+            !currentLogin.isNullOrBlank() && it.login.equals(currentLogin, ignoreCase = true) && it.token.isNotBlank()
+        } ?: dbHelper.savedAccounts.value.firstOrNull { it.token.isNotBlank() }
+
+        if (matchingAccount != null && matchingAccount.token != _token.value) {
+            _token.value = matchingAccount.token
+            prefs.edit().putString("github_token", matchingAccount.token).apply()
+            dbHelper.addInMemoryLog("AUTH", "/rehydrate", 200, 5, "Token dipulihkan dari saved_accounts (@${matchingAccount.login})")
+            return matchingAccount.token
+        }
+        return _token.value
     }
 
     suspend fun fetchRateLimit(): Result<RateLimitInfo> = withContext(Dispatchers.IO) {
@@ -1311,16 +1356,342 @@ class GitHubRepository(private val context: Context) {
                 .post(streamingBody)
                 .build()
 
-            val resp = httpClient.newCall(req).execute()
-            val bodyStr = resp.body?.string().orEmpty()
-            val code = resp.code
+            var resp = httpClient.newCall(req).execute()
+            var bodyStr = resp.body?.string().orEmpty()
+            var code = resp.code
             resp.close()
 
-            if (!resp.isSuccessful) {
+            if (code == 401) {
+                val recovered = tryRehydrateTokenFromSavedAccounts()
+                if (!recovered.isNullOrBlank()) {
+                    val retryReq = req.newBuilder().header("Authorization", "Bearer $recovered").build()
+                    resp = httpClient.newCall(retryReq).execute()
+                    bodyStr = resp.body?.string().orEmpty()
+                    code = resp.code
+                    resp.close()
+                }
+            }
+
+            if (code !in 200..299) {
+                if (code == 401 && dbHelper.configState.value.enableLogErrorAdvisor) {
+                    NotificationHelper.notifyError(
+                        context,
+                        title = "HTTP 401 saat Upload Blob",
+                        message = "Token kedaluwarsa atau ditolak. Ketuk untuk login ulang dengan Classic PAT.",
+                        targetRoute = "login"
+                    )
+                }
                 return@withContext Result.failure(Exception("Gagal upload blob HTTP $code: $bodyStr"))
             }
             val parsed = Gson().fromJson(bodyStr, BlobResponse::class.java)
             Result.success(parsed.sha)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // Explorer Source ZIP Download, Direct File Save, Branch Compare/Merge/Default/Delete, Global Code Search & Vercel Webhook
+    suspend fun downloadSourceZipToDownloads(
+        owner: String,
+        repo: String,
+        branch: String
+    ): Result<DownloadRecord> = withContext(Dispatchers.IO) {
+        val currentToken = _token.value
+        val safeBranch = branch.ifBlank { "main" }.replace("/", "_")
+        val fileName = "$repo-$safeBranch.zip"
+        val destFile = File(getDownloadsDir(), "${System.currentTimeMillis()}_$fileName")
+
+        if (_isDemoMode.value || currentToken.isNullOrBlank()) {
+            ZipOutputStream(FileOutputStream(destFile)).use { zos ->
+                zos.putNextEntry(ZipEntry("$repo-$safeBranch/README.md"))
+                zos.write("# $owner/$repo ($branch)\n\nDemo source ZIP snapshot by kruzenlab-uploader.\n".toByteArray())
+                zos.closeEntry()
+                zos.putNextEntry(ZipEntry("$repo-$safeBranch/src/Main.kt"))
+                zos.write("fun main() = println(\"KruzenLab $repo@$branch\")\n".toByteArray())
+                zos.closeEntry()
+            }
+            val rec = DownloadRecord(
+                repoFullName = "$owner/$repo",
+                fileName = fileName,
+                fileType = "zip",
+                localPath = destFile.absolutePath,
+                sizeBytes = destFile.length(),
+                sourceRunId = null
+            )
+            val id = dbHelper.insertDownload(rec)
+            dbHelper.addInMemoryLog("GET", "/repos/$owner/$repo/zipball/$branch (demo)", 200, 25, "Saved $fileName")
+            NotificationHelper.notifyActivity(
+                context,
+                title = "Source ZIP Tersimpan",
+                message = "$fileName siap di tab Downloads.",
+                targetRoute = "downloads",
+                isDownload = true
+            )
+            return@withContext Result.success(rec.copy(id = id))
+        }
+
+        try {
+            val resp = api.downloadRepoZipball("Bearer $currentToken", owner, repo, branch.ifBlank { "main" })
+            if (!resp.isSuccessful || resp.body() == null) {
+                return@withContext Result.failure(Exception("Gagal unduh Source ZIP (HTTP ${resp.code()})"))
+            }
+            resp.body()!!.byteStream().use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            val rec = DownloadRecord(
+                repoFullName = "$owner/$repo",
+                fileName = fileName,
+                fileType = "zip",
+                localPath = destFile.absolutePath,
+                sizeBytes = destFile.length(),
+                sourceRunId = null
+            )
+            val id = dbHelper.insertDownload(rec)
+            NotificationHelper.notifyActivity(
+                context,
+                title = "Source ZIP Diunduh",
+                message = "$fileName (${com.example.xiyu.util.ZipExtractor.formatSize(rec.sizeBytes)}) tersimpan di Downloads.",
+                targetRoute = "downloads",
+                isDownload = true
+            )
+            Result.success(rec.copy(id = id))
+        } catch (e: Exception) {
+            if (destFile.exists()) destFile.delete()
+            Result.failure(e)
+        }
+    }
+
+    suspend fun saveFileBytesToInternalDownloads(
+        repoFullName: String,
+        fileName: String,
+        bytes: ByteArray,
+        sourceRunId: Long? = null
+    ): Result<DownloadRecord> = withContext(Dispatchers.IO) {
+        try {
+            val cleanName = fileName.substringAfterLast('/').ifBlank { "downloaded_file" }
+            val destFile = File(getDownloadsDir(), "${System.currentTimeMillis()}_$cleanName")
+            destFile.writeBytes(bytes)
+            val fType = when {
+                cleanName.endsWith(".apk", true) -> "apk"
+                cleanName.endsWith(".zip", true) -> "zip"
+                cleanName.endsWith(".log", true) || cleanName.endsWith(".txt", true) -> "log"
+                else -> "asset"
+            }
+            val rec = DownloadRecord(
+                repoFullName = repoFullName,
+                fileName = cleanName,
+                fileType = fType,
+                localPath = destFile.absolutePath,
+                sizeBytes = destFile.length(),
+                sourceRunId = sourceRunId
+            )
+            val id = dbHelper.insertDownload(rec)
+            NotificationHelper.notifyActivity(
+                context,
+                title = "File Tersimpan ke Downloads",
+                message = "$cleanName siap dibuka dari tab Downloads.",
+                targetRoute = "downloads",
+                isDownload = true
+            )
+            Result.success(rec.copy(id = id))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun compareBranches(
+        owner: String,
+        repo: String,
+        baseBranch: String,
+        headBranch: String
+    ): Result<BranchCompareResponse> = withContext(Dispatchers.IO) {
+        val currentToken = _token.value
+        if (_isDemoMode.value || currentToken.isNullOrBlank()) {
+            return@withContext Result.success(
+                BranchCompareResponse(
+                    status = if (baseBranch == headBranch) "identical" else "ahead",
+                    aheadBy = if (baseBranch == headBranch) 0 else 3,
+                    behindBy = 0,
+                    totalCommits = if (baseBranch == headBranch) 0 else 3,
+                    htmlUrl = "https://github.com/$owner/$repo/compare/$baseBranch...$headBranch",
+                    files = if (baseBranch == headBranch) emptyList() else listOf(
+                        CompareFileItem("app/src/MainActivity.kt", "modified", 24, 5, 29),
+                        CompareFileItem("README.md", "modified", 8, 2, 10),
+                        CompareFileItem(".github/workflows/build.yml", "added", 42, 0, 42)
+                    )
+                )
+            )
+        }
+        try {
+            val basehead = "${URLEncoder.encode(baseBranch, "UTF-8")}...${URLEncoder.encode(headBranch, "UTF-8")}"
+            val resp = api.compareBranches("Bearer $currentToken", owner, repo, basehead)
+            Result.success(resp)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun mergeBranch(
+        owner: String,
+        repo: String,
+        baseBranch: String,
+        headBranch: String,
+        commitMessage: String = "Merge $headBranch into $baseBranch via kruzenlab-uploader"
+    ): Result<MergeBranchResponse> = withContext(Dispatchers.IO) {
+        val currentToken = _token.value
+        if (_isDemoMode.value || currentToken.isNullOrBlank()) {
+            dbHelper.addInMemoryLog("POST", "/repos/$owner/$repo/merges (demo)", 201, 20, "Merged $headBranch -> $baseBranch")
+            return@withContext Result.success(
+                MergeBranchResponse(sha = "demo_merge_${System.currentTimeMillis()}", merged = true, message = "Demo merge successful")
+            )
+        }
+        try {
+            val resp = api.mergeBranches(
+                "Bearer $currentToken",
+                owner,
+                repo,
+                MergeBranchRequest(base = baseBranch, head = headBranch, commitMessage = commitMessage)
+            )
+            if (resp.isSuccessful) {
+                val body = resp.body() ?: MergeBranchResponse(merged = true, message = "Fast-forward / up to date")
+                NotificationHelper.notifyActivity(
+                    context,
+                    title = "Merge Branch Berhasil",
+                    message = "$headBranch -> $baseBranch pada $owner/$repo",
+                    targetRoute = "repo_explorer"
+                )
+                Result.success(body)
+            } else {
+                Result.failure(Exception("Gagal merge branch (HTTP ${resp.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setDefaultBranch(
+        owner: String,
+        repo: String,
+        newDefaultBranch: String
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        val currentToken = _token.value
+        if (_isDemoMode.value || currentToken.isNullOrBlank()) {
+            dbHelper.addInMemoryLog("PATCH", "/repos/$owner/$repo (demo)", 200, 15, "Default branch -> $newDefaultBranch")
+            return@withContext Result.success(true)
+        }
+        try {
+            val resp = api.updateRepository(
+                "Bearer $currentToken",
+                owner,
+                repo,
+                UpdateRepoRequest(defaultBranch = newDefaultBranch)
+            )
+            if (resp.isSuccessful) {
+                Result.success(true)
+            } else {
+                Result.failure(Exception("Gagal ubah default branch (HTTP ${resp.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteBranch(
+        owner: String,
+        repo: String,
+        branchName: String
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        val currentToken = _token.value
+        if (_isDemoMode.value || currentToken.isNullOrBlank()) {
+            dbHelper.addInMemoryLog("DELETE", "/repos/$owner/$repo/git/refs/heads/$branchName (demo)", 204, 15, "Deleted branch $branchName")
+            return@withContext Result.success(true)
+        }
+        try {
+            val resp = api.deleteBranchRef("Bearer $currentToken", owner, repo, branchName)
+            if (resp.isSuccessful) {
+                Result.success(true)
+            } else {
+                Result.failure(Exception("Gagal hapus branch $branchName (HTTP ${resp.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun searchRepoCode(
+        owner: String,
+        repo: String,
+        query: String
+    ): Result<List<GlobalCodeSearchResult>> = withContext(Dispatchers.IO) {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isEmpty()) return@withContext Result.success(emptyList())
+        val currentToken = _token.value
+        if (_isDemoMode.value || currentToken.isNullOrBlank()) {
+            val demoCandidates = listOf(
+                GlobalCodeSearchResult("MainActivity.kt", "app/src/MainActivity.kt", "f5555"),
+                GlobalCodeSearchResult("build.gradle.kts", "app/build.gradle.kts", "f4444"),
+                GlobalCodeSearchResult("build.yml", ".github/workflows/build.yml", "f0003"),
+                GlobalCodeSearchResult("README.md", "README.md", "f1111"),
+                GlobalCodeSearchResult("package.json", "package.json", "f2222")
+            )
+            return@withContext Result.success(
+                demoCandidates.filter {
+                    it.name.contains(cleanQuery, ignoreCase = true) ||
+                        it.path.contains(cleanQuery, ignoreCase = true)
+                }.ifEmpty { demoCandidates.take(2) }
+            )
+        }
+        try {
+            val fullQuery = "$cleanQuery repo:$owner/$repo"
+            val resp = api.searchCode("Bearer $currentToken", fullQuery)
+            Result.success(resp.items)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun triggerVercelWebhook(
+        repoFullName: String,
+        hookUrl: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val cleanUrl = hookUrl.trim()
+        if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+            return@withContext Result.failure(IllegalArgumentException("URL Deploy Hook Vercel harus diawali https://"))
+        }
+        if (_isDemoMode.value) {
+            dbHelper.markWebhookDeployed(repoFullName)
+            dbHelper.addInMemoryLog("POST", "/vercel-hook (demo)", 201, 30, "Triggered demo deploy for $repoFullName")
+            NotificationHelper.notifyActivity(
+                context,
+                title = "Vercel Deploy Dipicu",
+                message = "Webhook deployment berhasil dikirim untuk $repoFullName (Demo).",
+                targetRoute = "repo_explorer"
+            )
+            return@withContext Result.success("Demo Vercel Deploy Hook berhasil dipicu!")
+        }
+        try {
+            val req = Request.Builder()
+                .url(cleanUrl)
+                .post("{}".toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val code = resp.code
+            val body = resp.body?.string().orEmpty()
+            resp.close()
+            if (code in 200..299) {
+                dbHelper.markWebhookDeployed(repoFullName)
+                NotificationHelper.notifyActivity(
+                    context,
+                    title = "Vercel Deploy Dipicu",
+                    message = "Deployment build dimulai untuk $repoFullName (HTTP $code).",
+                    targetRoute = "repo_explorer"
+                )
+                Result.success("Vercel Deploy dimulai (HTTP $code)")
+            } else {
+                Result.failure(Exception("Vercel Hook ditolak (HTTP $code): $body"))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }

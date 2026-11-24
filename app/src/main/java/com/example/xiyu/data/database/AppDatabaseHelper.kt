@@ -6,6 +6,9 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.example.xiyu.data.model.AccountEntity
 import com.example.xiyu.data.model.DownloadRecord
+import com.example.xiyu.data.model.RepoWebhookEntity
+import com.example.xiyu.data.model.ThemeMode
+import com.example.xiyu.data.model.ThemeSettingsEntity
 import com.example.xiyu.data.model.UploadQueueItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,7 +24,20 @@ data class AppConfigEntity(
     val defaultBranch: String = "main",
     val autoReadme: Boolean = true,
     val autoLicense: String = "MIT",
-    val autoGitignore: String = "Node"
+    val autoGitignore: String = "Node",
+    // 10 Master Feature Toggles (default active, toggleable OFF as safe fallback)
+    val useFastHighSpeedEditor: Boolean = true,
+    val enableZipDeepEditor: Boolean = true,
+    val enableSystemNotifications: Boolean = true,
+    val enableLogErrorAdvisor: Boolean = true,
+    val enableBranchCompare: Boolean = true,
+    val enableAutoInstallApk: Boolean = true,
+    val enableSmartGitignore: Boolean = true,
+    val enableRateLimitPacer: Boolean = true,
+    val enableVercelWebhook: Boolean = true,
+    val enableGlobalRepoSearch: Boolean = true,
+    // Lightweight Theme Customization
+    val themeSettings: ThemeSettingsEntity = ThemeSettingsEntity()
 ) {
     val effectiveClientId: String
         get() = clientId.ifBlank { "Ov23lizAXWwIXYOXCLKg" }
@@ -59,7 +75,7 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
 
     companion object {
         const val DATABASE_NAME = "kruzenlab_backend.db"
-        const val DATABASE_VERSION = 3
+        const val DATABASE_VERSION = 4
 
         private const val TABLE_CONFIG = "app_config"
         private const val COL_ID = "id"
@@ -71,6 +87,23 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
         private const val COL_AUTO_README = "auto_readme"
         private const val COL_AUTO_LICENSE = "auto_license"
         private const val COL_AUTO_GITIGNORE = "auto_gitignore"
+        // New v4 feature toggle & theme columns
+        private const val COL_FAST_EDITOR = "use_fast_high_speed_editor"
+        private const val COL_ZIP_DEEP_EDITOR = "enable_zip_deep_editor"
+        private const val COL_SYS_NOTIF = "enable_system_notifications"
+        private const val COL_LOG_ADVISOR = "enable_log_error_advisor"
+        private const val COL_BRANCH_COMPARE = "enable_branch_compare"
+        private const val COL_AUTO_INSTALL_APK = "enable_auto_install_apk"
+        private const val COL_SMART_GITIGNORE = "enable_smart_gitignore"
+        private const val COL_RATE_PACER = "enable_rate_limit_pacer"
+        private const val COL_VERCEL_HOOK = "enable_vercel_webhook"
+        private const val COL_GLOBAL_SEARCH = "enable_global_repo_search"
+        private const val COL_THEME_MODE = "theme_mode"
+        private const val COL_FONT_SCALE = "font_scale"
+        private const val COL_HEX_PRIMARY = "custom_primary_hex"
+        private const val COL_HEX_SECONDARY = "custom_secondary_hex"
+        private const val COL_HEX_ACCENT = "custom_accent_hex"
+        private const val COL_HEX_TEXT = "custom_text_hex"
 
         private const val TABLE_ACCOUNTS = "saved_accounts"
         private const val COL_ACC_LOGIN = "login"
@@ -120,6 +153,11 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
         private const val COL_UQ_STATUS = "status"
         private const val COL_UQ_UPDATED_AT = "updated_at"
 
+        private const val TABLE_WEBHOOKS = "repo_webhooks"
+        private const val COL_WH_REPO = "repo_full_name"
+        private const val COL_WH_URL = "vercel_hook_url"
+        private const val COL_WH_LAST_AT = "last_deployed_at"
+
         @Volatile
         private var instance: AppDatabaseHelper? = null
 
@@ -136,6 +174,9 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
     private val _recentLogs = MutableStateFlow<List<NetworkLogRecord>>(emptyList())
     val recentLogs: StateFlow<List<NetworkLogRecord>> = _recentLogs.asStateFlow()
 
+    private val _latestHttpError = MutableStateFlow<NetworkLogRecord?>(null)
+    val latestHttpError: StateFlow<NetworkLogRecord?> = _latestHttpError.asStateFlow()
+
     private val _commitHistory = MutableStateFlow<List<CommitRecord>>(emptyList())
     val commitHistory: StateFlow<List<CommitRecord>> = _commitHistory.asStateFlow()
 
@@ -148,6 +189,9 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
     private val _uploadQueue = MutableStateFlow<List<UploadQueueItem>>(emptyList())
     val uploadQueue: StateFlow<List<UploadQueueItem>> = _uploadQueue.asStateFlow()
 
+    private val _repoWebhooks = MutableStateFlow<List<RepoWebhookEntity>>(emptyList())
+    val repoWebhooks: StateFlow<List<RepoWebhookEntity>> = _repoWebhooks.asStateFlow()
+
     init {
         loadConfigSynchronously()
         refreshLogsSynchronously()
@@ -155,6 +199,7 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
         refreshAccountsSynchronously()
         refreshDownloadsSynchronously()
         refreshUploadQueueSynchronously()
+        refreshWebhooksSynchronously()
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -169,7 +214,23 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
                 $COL_DEFAULT_BRANCH TEXT,
                 $COL_AUTO_README INTEGER,
                 $COL_AUTO_LICENSE TEXT,
-                $COL_AUTO_GITIGNORE TEXT
+                $COL_AUTO_GITIGNORE TEXT,
+                $COL_FAST_EDITOR INTEGER DEFAULT 1,
+                $COL_ZIP_DEEP_EDITOR INTEGER DEFAULT 1,
+                $COL_SYS_NOTIF INTEGER DEFAULT 1,
+                $COL_LOG_ADVISOR INTEGER DEFAULT 1,
+                $COL_BRANCH_COMPARE INTEGER DEFAULT 1,
+                $COL_AUTO_INSTALL_APK INTEGER DEFAULT 1,
+                $COL_SMART_GITIGNORE INTEGER DEFAULT 1,
+                $COL_RATE_PACER INTEGER DEFAULT 1,
+                $COL_VERCEL_HOOK INTEGER DEFAULT 1,
+                $COL_GLOBAL_SEARCH INTEGER DEFAULT 1,
+                $COL_THEME_MODE TEXT DEFAULT 'DEFAULT_BRAND',
+                $COL_FONT_SCALE REAL DEFAULT 1.0,
+                $COL_HEX_PRIMARY TEXT DEFAULT '',
+                $COL_HEX_SECONDARY TEXT DEFAULT '',
+                $COL_HEX_ACCENT TEXT DEFAULT '',
+                $COL_HEX_TEXT TEXT DEFAULT ''
             )
             """.trimIndent()
         )
@@ -218,6 +279,7 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
         )
 
         createDownloadsAndQueueTables(db)
+        createWebhooksTable(db)
 
         val initialValues = ContentValues().apply {
             put(COL_ID, 1)
@@ -229,6 +291,22 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
             put(COL_AUTO_README, 1)
             put(COL_AUTO_LICENSE, "MIT")
             put(COL_AUTO_GITIGNORE, "Node")
+            put(COL_FAST_EDITOR, 1)
+            put(COL_ZIP_DEEP_EDITOR, 1)
+            put(COL_SYS_NOTIF, 1)
+            put(COL_LOG_ADVISOR, 1)
+            put(COL_BRANCH_COMPARE, 1)
+            put(COL_AUTO_INSTALL_APK, 1)
+            put(COL_SMART_GITIGNORE, 1)
+            put(COL_RATE_PACER, 1)
+            put(COL_VERCEL_HOOK, 1)
+            put(COL_GLOBAL_SEARCH, 1)
+            put(COL_THEME_MODE, ThemeMode.DEFAULT_BRAND.name)
+            put(COL_FONT_SCALE, 1.0f)
+            put(COL_HEX_PRIMARY, "")
+            put(COL_HEX_SECONDARY, "")
+            put(COL_HEX_ACCENT, "")
+            put(COL_HEX_TEXT, "")
         }
         db.insertWithOnConflict(TABLE_CONFIG, null, initialValues, SQLiteDatabase.CONFLICT_IGNORE)
     }
@@ -270,10 +348,34 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
         )
     }
 
+    private fun createWebhooksTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS $TABLE_WEBHOOKS (
+                $COL_WH_REPO TEXT PRIMARY KEY,
+                $COL_WH_URL TEXT,
+                $COL_WH_LAST_AT INTEGER DEFAULT 0
+            )
+            """.trimIndent()
+        )
+    }
+
+    private fun ensureConfigColumn(db: SQLiteDatabase, columnName: String, definition: String) {
+        val existingCols = mutableSetOf<String>()
+        db.rawQuery("PRAGMA table_info($TABLE_CONFIG)", null).use { cursor ->
+            val nameIdx = cursor.getColumnIndex("name")
+            while (cursor.moveToNext()) {
+                if (nameIdx >= 0) existingCols.add(cursor.getString(nameIdx))
+            }
+        }
+        if (!existingCols.contains(columnName)) {
+            db.execSQL("ALTER TABLE $TABLE_CONFIG ADD COLUMN $columnName $definition")
+        }
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 3) {
             createDownloadsAndQueueTables(db)
-            // Backfill blank OAuth credentials with exact verified defaults
             db.execSQL(
                 "UPDATE $TABLE_CONFIG SET $COL_CLIENT_ID = 'Ov23lizAXWwIXYOXCLKg' WHERE $COL_CLIENT_ID IS NULL OR $COL_CLIENT_ID = ''"
             )
@@ -281,6 +383,41 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
                 "UPDATE $TABLE_CONFIG SET $COL_CLIENT_SECRET = '1b02b712f931cc0eed574a1c98a581f63d5fadb7' WHERE $COL_CLIENT_SECRET IS NULL OR $COL_CLIENT_SECRET = ''"
             )
         }
+        if (oldVersion < 4) {
+            // Non-destructive upgrade preserving 100% of existing accounts, credentials, commits, downloads & queue
+            ensureConfigColumn(db, COL_FAST_EDITOR, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_ZIP_DEEP_EDITOR, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_SYS_NOTIF, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_LOG_ADVISOR, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_BRANCH_COMPARE, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_AUTO_INSTALL_APK, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_SMART_GITIGNORE, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_RATE_PACER, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_VERCEL_HOOK, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_GLOBAL_SEARCH, "INTEGER DEFAULT 1")
+            ensureConfigColumn(db, COL_THEME_MODE, "TEXT DEFAULT 'DEFAULT_BRAND'")
+            ensureConfigColumn(db, COL_FONT_SCALE, "REAL DEFAULT 1.0")
+            ensureConfigColumn(db, COL_HEX_PRIMARY, "TEXT DEFAULT ''")
+            ensureConfigColumn(db, COL_HEX_SECONDARY, "TEXT DEFAULT ''")
+            ensureConfigColumn(db, COL_HEX_ACCENT, "TEXT DEFAULT ''")
+            ensureConfigColumn(db, COL_HEX_TEXT, "TEXT DEFAULT ''")
+            createWebhooksTable(db)
+        }
+    }
+
+    private fun android.database.Cursor.getIntOrDefault(col: String, default: Int): Int {
+        val idx = getColumnIndex(col)
+        return if (idx >= 0 && !isNull(idx)) getInt(idx) else default
+    }
+
+    private fun android.database.Cursor.getFloatOrDefault(col: String, default: Float): Float {
+        val idx = getColumnIndex(col)
+        return if (idx >= 0 && !isNull(idx)) getFloat(idx) else default
+    }
+
+    private fun android.database.Cursor.getStringOrDefault(col: String, default: String): String {
+        val idx = getColumnIndex(col)
+        return if (idx >= 0 && !isNull(idx)) getString(idx) ?: default else default
     }
 
     private fun loadConfigSynchronously() {
@@ -288,20 +425,41 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
             val db = readableDatabase
             val cursor = db.rawQuery("SELECT * FROM $TABLE_CONFIG WHERE $COL_ID = 1", null)
             if (cursor.moveToFirst()) {
-                val rawCid = cursor.getString(cursor.getColumnIndexOrThrow(COL_CLIENT_ID)) ?: ""
-                val rawCsec = cursor.getString(cursor.getColumnIndexOrThrow(COL_CLIENT_SECRET)) ?: ""
+                val rawCid = cursor.getStringOrDefault(COL_CLIENT_ID, "")
+                val rawCsec = cursor.getStringOrDefault(COL_CLIENT_SECRET, "")
+                val themeModeRaw = cursor.getStringOrDefault(COL_THEME_MODE, ThemeMode.DEFAULT_BRAND.name)
+                val themeMode = runCatching { ThemeMode.valueOf(themeModeRaw) }.getOrDefault(ThemeMode.DEFAULT_BRAND)
+
                 val entity = AppConfigEntity(
                     clientId = rawCid.ifBlank { "Ov23lizAXWwIXYOXCLKg" },
                     clientSecret = rawCsec.ifBlank { "1b02b712f931cc0eed574a1c98a581f63d5fadb7" },
-                    sessionPassword = (cursor.getString(cursor.getColumnIndexOrThrow(COL_SESSION_PASSWORD)) ?: "")
+                    sessionPassword = cursor.getStringOrDefault(COL_SESSION_PASSWORD, "")
                         .ifBlank { "bagja_uploader_secret_session_key_32char_min" },
-                    githubApiUrl = (cursor.getString(cursor.getColumnIndexOrThrow(COL_API_URL)) ?: "")
+                    githubApiUrl = cursor.getStringOrDefault(COL_API_URL, "")
                         .ifBlank { "https://api.github.com/" },
-                    defaultBranch = (cursor.getString(cursor.getColumnIndexOrThrow(COL_DEFAULT_BRANCH)) ?: "")
+                    defaultBranch = cursor.getStringOrDefault(COL_DEFAULT_BRANCH, "")
                         .ifBlank { "main" },
-                    autoReadme = cursor.getInt(cursor.getColumnIndexOrThrow(COL_AUTO_README)) == 1,
-                    autoLicense = cursor.getString(cursor.getColumnIndexOrThrow(COL_AUTO_LICENSE)) ?: "MIT",
-                    autoGitignore = cursor.getString(cursor.getColumnIndexOrThrow(COL_AUTO_GITIGNORE)) ?: "Node"
+                    autoReadme = cursor.getIntOrDefault(COL_AUTO_README, 1) == 1,
+                    autoLicense = cursor.getStringOrDefault(COL_AUTO_LICENSE, "MIT"),
+                    autoGitignore = cursor.getStringOrDefault(COL_AUTO_GITIGNORE, "Node"),
+                    useFastHighSpeedEditor = cursor.getIntOrDefault(COL_FAST_EDITOR, 1) == 1,
+                    enableZipDeepEditor = cursor.getIntOrDefault(COL_ZIP_DEEP_EDITOR, 1) == 1,
+                    enableSystemNotifications = cursor.getIntOrDefault(COL_SYS_NOTIF, 1) == 1,
+                    enableLogErrorAdvisor = cursor.getIntOrDefault(COL_LOG_ADVISOR, 1) == 1,
+                    enableBranchCompare = cursor.getIntOrDefault(COL_BRANCH_COMPARE, 1) == 1,
+                    enableAutoInstallApk = cursor.getIntOrDefault(COL_AUTO_INSTALL_APK, 1) == 1,
+                    enableSmartGitignore = cursor.getIntOrDefault(COL_SMART_GITIGNORE, 1) == 1,
+                    enableRateLimitPacer = cursor.getIntOrDefault(COL_RATE_PACER, 1) == 1,
+                    enableVercelWebhook = cursor.getIntOrDefault(COL_VERCEL_HOOK, 1) == 1,
+                    enableGlobalRepoSearch = cursor.getIntOrDefault(COL_GLOBAL_SEARCH, 1) == 1,
+                    themeSettings = ThemeSettingsEntity(
+                        themeMode = themeMode,
+                        fontScale = cursor.getFloatOrDefault(COL_FONT_SCALE, 1.0f).coerceIn(0.8f, 1.4f),
+                        customPrimaryHex = cursor.getStringOrDefault(COL_HEX_PRIMARY, ""),
+                        customSecondaryHex = cursor.getStringOrDefault(COL_HEX_SECONDARY, ""),
+                        customAccentHex = cursor.getStringOrDefault(COL_HEX_ACCENT, ""),
+                        customTextHex = cursor.getStringOrDefault(COL_HEX_TEXT, "")
+                    )
                 )
                 _configState.value = entity
             }
@@ -327,9 +485,84 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
             put(COL_AUTO_README, if (normalized.autoReadme) 1 else 0)
             put(COL_AUTO_LICENSE, normalized.autoLicense.trim())
             put(COL_AUTO_GITIGNORE, normalized.autoGitignore.trim())
+            put(COL_FAST_EDITOR, if (normalized.useFastHighSpeedEditor) 1 else 0)
+            put(COL_ZIP_DEEP_EDITOR, if (normalized.enableZipDeepEditor) 1 else 0)
+            put(COL_SYS_NOTIF, if (normalized.enableSystemNotifications) 1 else 0)
+            put(COL_LOG_ADVISOR, if (normalized.enableLogErrorAdvisor) 1 else 0)
+            put(COL_BRANCH_COMPARE, if (normalized.enableBranchCompare) 1 else 0)
+            put(COL_AUTO_INSTALL_APK, if (normalized.enableAutoInstallApk) 1 else 0)
+            put(COL_SMART_GITIGNORE, if (normalized.enableSmartGitignore) 1 else 0)
+            put(COL_RATE_PACER, if (normalized.enableRateLimitPacer) 1 else 0)
+            put(COL_VERCEL_HOOK, if (normalized.enableVercelWebhook) 1 else 0)
+            put(COL_GLOBAL_SEARCH, if (normalized.enableGlobalRepoSearch) 1 else 0)
+            put(COL_THEME_MODE, normalized.themeSettings.themeMode.name)
+            put(COL_FONT_SCALE, normalized.themeSettings.fontScale)
+            put(COL_HEX_PRIMARY, normalized.themeSettings.customPrimaryHex.trim())
+            put(COL_HEX_SECONDARY, normalized.themeSettings.customSecondaryHex.trim())
+            put(COL_HEX_ACCENT, normalized.themeSettings.customAccentHex.trim())
+            put(COL_HEX_TEXT, normalized.themeSettings.customTextHex.trim())
         }
-        db.update(TABLE_CONFIG, values, "$COL_ID = 1", null)
+        val rows = db.update(TABLE_CONFIG, values, "$COL_ID = 1", null)
+        if (rows == 0) {
+            values.put(COL_ID, 1)
+            db.insertWithOnConflict(TABLE_CONFIG, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+        }
         _configState.value = normalized
+    }
+
+    // Repo Vercel Webhooks CRUD
+    suspend fun saveRepoWebhook(repoFullName: String, url: String) = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        val cleanUrl = url.trim()
+        if (cleanUrl.isEmpty()) {
+            db.delete(TABLE_WEBHOOKS, "$COL_WH_REPO = ?", arrayOf(repoFullName))
+        } else {
+            val values = ContentValues().apply {
+                put(COL_WH_REPO, repoFullName)
+                put(COL_WH_URL, cleanUrl)
+                put(COL_WH_LAST_AT, 0L)
+            }
+            db.insertWithOnConflict(TABLE_WEBHOOKS, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+        }
+        refreshWebhooksSynchronously()
+    }
+
+    suspend fun markWebhookDeployed(repoFullName: String) = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        val values = ContentValues().apply {
+            put(COL_WH_LAST_AT, System.currentTimeMillis())
+        }
+        db.update(TABLE_WEBHOOKS, values, "$COL_WH_REPO = ?", arrayOf(repoFullName))
+        refreshWebhooksSynchronously()
+    }
+
+    suspend fun deleteRepoWebhook(repoFullName: String) = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.delete(TABLE_WEBHOOKS, "$COL_WH_REPO = ?", arrayOf(repoFullName))
+        refreshWebhooksSynchronously()
+    }
+
+    fun getWebhookForRepo(repoFullName: String): RepoWebhookEntity? {
+        return _repoWebhooks.value.firstOrNull { it.repoFullName == repoFullName }
+    }
+
+    private fun refreshWebhooksSynchronously() {
+        try {
+            val db = readableDatabase
+            val cursor = db.rawQuery("SELECT * FROM $TABLE_WEBHOOKS ORDER BY $COL_WH_REPO ASC", null)
+            val list = mutableListOf<RepoWebhookEntity>()
+            while (cursor.moveToNext()) {
+                list.add(
+                    RepoWebhookEntity(
+                        repoFullName = cursor.getString(cursor.getColumnIndexOrThrow(COL_WH_REPO)) ?: "",
+                        vercelHookUrl = cursor.getString(cursor.getColumnIndexOrThrow(COL_WH_URL)) ?: "",
+                        lastDeployedAt = cursor.getLong(cursor.getColumnIndexOrThrow(COL_WH_LAST_AT))
+                    )
+                )
+            }
+            cursor.close()
+            _repoWebhooks.value = list
+        } catch (_: Exception) {}
     }
 
     // Downloads CRUD
@@ -564,6 +797,7 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
         refreshAccountsSynchronously()
         refreshDownloadsSynchronously()
         refreshUploadQueueSynchronously()
+        refreshWebhooksSynchronously()
     }
 
     private fun refreshCommitsSynchronously() {
@@ -604,6 +838,9 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
             val current = _recentLogs.value.toMutableList()
             current.add(0, record)
             _recentLogs.value = current.take(100)
+            if (statusCode == 0 || statusCode >= 400) {
+                _latestHttpError.value = record
+            }
 
             val db = writableDatabase
             val values = ContentValues().apply {
@@ -616,6 +853,10 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
             }
             db.insert(TABLE_LOGS, null, values)
         } catch (_: Exception) {}
+    }
+
+    fun dismissLatestHttpError() {
+        _latestHttpError.value = null
     }
 
     private fun refreshLogsSynchronously() {
@@ -645,6 +886,7 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
         val db = writableDatabase
         db.delete(TABLE_LOGS, null, null)
         _recentLogs.value = emptyList()
+        _latestHttpError.value = null
     }
 
     suspend fun resetDatabase() = withContext(Dispatchers.IO) {
@@ -656,6 +898,7 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
         saveConfig(resetConfig)
         _commitHistory.value = emptyList()
         _recentLogs.value = emptyList()
+        _latestHttpError.value = null
         _uploadQueue.value = emptyList()
     }
 }

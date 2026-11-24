@@ -24,6 +24,7 @@ data class ExplorerUiState(
     val repos: List<GitHubRepo> = emptyList(),
     val selectedRepo: GitHubRepo? = null,
     val selectedBranch: String = "main",
+    val branches: List<GitHubBranch> = emptyList(),
     val currentPath: String = "",
     val folderCache: Map<String, List<RepoContentItem>> = emptyMap(),
     val isLoading: Boolean = false,
@@ -71,6 +72,7 @@ data class UploaderUiState(
 data class WorkflowsUiState(
     val repos: List<GitHubRepo> = emptyList(),
     val selectedRepo: GitHubRepo? = null,
+    val selectedBranch: String = "main",
     val selectedTab: Int = 0, // 0: Releases, 1: Actions CI/CD, 2: Branches
     val releases: List<GitHubRelease> = emptyList(),
     val workflowRuns: List<WorkflowRun> = emptyList(),
@@ -129,6 +131,20 @@ class AppStateViewModel(application: Application) : AndroidViewModel(application
 
     private var pollingJob: Job? = null
     private var cicdPollingJob: Job? = null
+
+    init {
+        // Automatically clear explorer cache & reload workspace whenever account/login/logout/demo switches
+        viewModelScope.launch {
+            repository.authRevision.drop(1).collect {
+                _explorerState.value = ExplorerUiState()
+                _dashboardState.value = DashboardUiState()
+                _workflowsState.value = WorkflowsUiState()
+                _cicdState.value = CiCdMonitorUiState()
+                _uploaderState.update { it.copy(existingRepos = emptyList(), selectedExistingRepo = null) }
+                refreshExplorerRepos(resetPath = true)
+            }
+        }
+    }
 
     // Dashboard Manual Refresh (Zero auto-reset on tab revisit)
     fun ensureDashboardInitialized() {
@@ -192,6 +208,7 @@ class AppStateViewModel(application: Application) : AndroidViewModel(application
                         )
                     }
                     if (targetRepo != null) {
+                        loadExplorerBranches(targetRepo)
                         fetchExplorerDirectory(targetRepo, targetBranch, targetPath, forceNetwork = true, onDone = onDone)
                     } else {
                         onDone(null)
@@ -205,11 +222,76 @@ class AppStateViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun resetExplorerWorkspace(onDone: (String?) -> Unit = {}) {
+        _explorerState.value = ExplorerUiState(isLoading = true)
+        refreshExplorerRepos(resetPath = true, onDone = onDone)
+    }
+
     fun selectExplorerRepo(repo: GitHubRepo) {
         _explorerState.update {
-            it.copy(selectedRepo = repo, selectedBranch = repo.defaultBranch, currentPath = "")
+            it.copy(
+                selectedRepo = repo,
+                selectedBranch = repo.defaultBranch,
+                branches = emptyList(),
+                currentPath = ""
+            )
         }
+        loadExplorerBranches(repo)
         openExplorerPath("")
+    }
+
+    fun selectExplorerBranch(branch: String, onDone: (String?) -> Unit = {}) {
+        val repo = _explorerState.value.selectedRepo ?: return
+        _explorerState.update {
+            it.copy(selectedBranch = branch, currentPath = "")
+        }
+        if (_workflowsState.value.selectedRepo?.fullName == repo.fullName) {
+            _workflowsState.update { it.copy(selectedBranch = branch) }
+        }
+        fetchExplorerDirectory(repo, branch, "", forceNetwork = true, onDone = onDone)
+    }
+
+    private fun loadExplorerBranches(repo: GitHubRepo) {
+        val owner = repo.fullName.substringBefore('/')
+        viewModelScope.launch {
+            repository.getBranches(owner, repo.name).onSuccess { list ->
+                _explorerState.update { st ->
+                    if (st.selectedRepo?.fullName == repo.fullName) {
+                        st.copy(branches = list)
+                    } else {
+                        st
+                    }
+                }
+            }
+        }
+    }
+
+    fun downloadExplorerSourceZip(onError: (String) -> Unit, onSuccess: (DownloadRecord) -> Unit) {
+        val st = _explorerState.value
+        val repo = st.selectedRepo ?: return
+        val owner = repo.fullName.substringBefore('/')
+        val branch = st.selectedBranch.ifBlank { repo.defaultBranch }
+        viewModelScope.launch {
+            repository.downloadSourceZipToDownloads(owner, repo.name, branch).fold(
+                onSuccess = { rec -> onSuccess(rec) },
+                onFailure = { err -> onError(err.localizedMessage ?: "Gagal mengunduh Source ZIP") }
+            )
+        }
+    }
+
+    fun saveExplorerFileToDownloads(
+        fileName: String,
+        bytes: ByteArray,
+        onError: (String) -> Unit,
+        onSuccess: (DownloadRecord) -> Unit
+    ) {
+        val repoFullName = _explorerState.value.selectedRepo?.fullName ?: "local/repo"
+        viewModelScope.launch {
+            repository.saveFileBytesToInternalDownloads(repoFullName, fileName, bytes).fold(
+                onSuccess = { onSuccess(it) },
+                onFailure = { onError(it.localizedMessage ?: "Gagal menyimpan berkas") }
+            )
+        }
     }
 
     fun openExplorerPath(path: String, forceNetwork: Boolean = false, onDone: (String?) -> Unit = {}) {
@@ -228,6 +310,7 @@ class AppStateViewModel(application: Application) : AndroidViewModel(application
     fun refreshCurrentExplorerFolder(onDone: (String?) -> Unit = {}) {
         val st = _explorerState.value
         val repo = st.selectedRepo ?: return
+        loadExplorerBranches(repo)
         fetchExplorerDirectory(repo, st.selectedBranch, st.currentPath, forceNetwork = true, onDone = onDone)
     }
 
@@ -289,6 +372,104 @@ class AppStateViewModel(application: Application) : AndroidViewModel(application
                 }
                 st.copy(includeParentFolderInPath = includeParent, entries = updated)
             }
+        }
+    }
+
+    fun applyStagedEntriesMerge(
+        incoming: List<FileEntry>,
+        replaceConflicts: Boolean,
+        archiveName: String? = null,
+        folderName: String? = null,
+        sourceModeName: String? = null
+    ): Pair<Int, Int> {
+        var addedCount = 0
+        var replacedCount = 0
+        _uploaderState.update { st ->
+            val map = linkedMapOf<String, FileEntry>()
+            st.entries.forEach { map[it.path] = it }
+
+            incoming.forEach { newItem ->
+                val existing = map[newItem.path]
+                if (existing == null) {
+                    map[newItem.path] = newItem
+                    addedCount++
+                } else if (replaceConflicts) {
+                    map[newItem.path] = newItem
+                    replacedCount++
+                }
+            }
+            val mergedList = map.values.toList()
+            st.copy(
+                entries = mergedList,
+                totalStagedBytes = mergedList.sumOf { it.size },
+                archiveName = archiveName ?: st.archiveName,
+                selectedFolderName = folderName ?: st.selectedFolderName,
+                sourceModeName = sourceModeName ?: st.sourceModeName,
+                lastSuccessResult = null
+            )
+        }
+        return addedCount to replacedCount
+    }
+
+    fun toggleStagedEntrySelection(path: String, selected: Boolean) {
+        _uploaderState.update { st ->
+            val updated = st.entries.map {
+                if (it.path == path) it.copy(isSelected = selected) else it
+            }
+            st.copy(entries = updated)
+        }
+    }
+
+    fun toggleStagedFolderSelection(folderPrefix: String, selected: Boolean) {
+        val normalizedPrefix = if (folderPrefix.isEmpty()) "" else folderPrefix.trimEnd('/') + "/"
+        _uploaderState.update { st ->
+            val updated = st.entries.map { entry ->
+                val matches = if (normalizedPrefix.isEmpty()) {
+                    !entry.path.contains('/')
+                } else {
+                    entry.path.startsWith(normalizedPrefix)
+                }
+                if (matches) entry.copy(isSelected = selected) else entry
+            }
+            st.copy(entries = updated)
+        }
+    }
+
+    fun removeSelectedStagedEntries(): Int {
+        var removed = 0
+        _uploaderState.update { st ->
+            val toKeep = mutableListOf<FileEntry>()
+            st.entries.forEach { entry ->
+                if (entry.isSelected) {
+                    removed++
+                    entry.localStagingPath?.let { path ->
+                        runCatching { File(path).delete() }
+                    }
+                } else {
+                    toKeep.add(entry)
+                }
+            }
+            st.copy(
+                entries = toKeep,
+                totalStagedBytes = toKeep.sumOf { it.size }
+            )
+        }
+        return removed
+    }
+
+    fun clearAllStagedEntries() {
+        _uploaderState.update { st ->
+            st.entries.forEach { entry ->
+                entry.localStagingPath?.let { path -> runCatching { File(path).delete() } }
+            }
+            repository.resetIntakeStagingDir()
+            st.copy(
+                entries = emptyList(),
+                archiveName = null,
+                selectedFolderName = null,
+                totalStagedBytes = 0L,
+                lastSuccessResult = null
+            )
         }
     }
 
@@ -452,7 +633,13 @@ class AppStateViewModel(application: Application) : AndroidViewModel(application
                     val prev = _workflowsState.value.selectedRepo
                     val target = prev?.let { p -> list.find { it.fullName == p.fullName } } ?: list.firstOrNull()
                     _workflowsState.update {
-                        it.copy(repos = list, selectedRepo = target, hasInitialized = true, isLoading = false)
+                        it.copy(
+                            repos = list,
+                            selectedRepo = target,
+                            selectedBranch = target?.defaultBranch ?: "main",
+                            hasInitialized = true,
+                            isLoading = false
+                        )
                     }
                     if (target != null) {
                         refreshActiveWorkflowTab()
@@ -484,12 +671,77 @@ class AppStateViewModel(application: Application) : AndroidViewModel(application
         _workflowsState.update {
             it.copy(
                 selectedRepo = repo,
+                selectedBranch = repo.defaultBranch,
                 releases = emptyList(),
                 workflowRuns = emptyList(),
                 branches = emptyList()
             )
         }
         refreshActiveWorkflowTab()
+    }
+
+    fun syncWorkflowBranchSelection(branchName: String) {
+        val wfRepo = _workflowsState.value.selectedRepo
+        _workflowsState.update { it.copy(selectedBranch = branchName) }
+        if (wfRepo != null && _explorerState.value.selectedRepo?.fullName == wfRepo.fullName) {
+            _explorerState.update { it.copy(selectedBranch = branchName, currentPath = "") }
+            fetchExplorerDirectory(wfRepo, branchName, "", forceNetwork = true) {}
+        }
+    }
+
+    fun setWorkflowDefaultBranch(
+        branchName: String,
+        onError: (String) -> Unit,
+        onSuccess: () -> Unit
+    ) {
+        val repo = _workflowsState.value.selectedRepo ?: return
+        val owner = repo.fullName.substringBefore('/')
+        viewModelScope.launch {
+            repository.setDefaultBranch(owner, repo.name, branchName).fold(
+                onSuccess = {
+                    val updatedRepo = repo.copy(defaultBranch = branchName)
+                    _workflowsState.update { st ->
+                        st.copy(
+                            selectedRepo = updatedRepo,
+                            selectedBranch = branchName,
+                            repos = st.repos.map { if (it.fullName == updatedRepo.fullName) updatedRepo else it }
+                        )
+                    }
+                    if (_explorerState.value.selectedRepo?.fullName == updatedRepo.fullName) {
+                        _explorerState.update { st ->
+                            st.copy(
+                                selectedRepo = updatedRepo,
+                                repos = st.repos.map { if (it.fullName == updatedRepo.fullName) updatedRepo else it }
+                            )
+                        }
+                    }
+                    onSuccess()
+                },
+                onFailure = { onError(it.localizedMessage ?: "Gagal mengatur default branch") }
+            )
+        }
+    }
+
+    fun deleteWorkflowBranch(
+        branchName: String,
+        onError: (String) -> Unit,
+        onSuccess: () -> Unit
+    ) {
+        val repo = _workflowsState.value.selectedRepo ?: return
+        val owner = repo.fullName.substringBefore('/')
+        viewModelScope.launch {
+            repository.deleteBranch(owner, repo.name, branchName).fold(
+                onSuccess = {
+                    _workflowsState.update { st ->
+                        val nextBranches = st.branches.filterNot { it.name == branchName }
+                        val nextActive = if (st.selectedBranch == branchName) repo.defaultBranch else st.selectedBranch
+                        st.copy(branches = nextBranches, selectedBranch = nextActive)
+                    }
+                    onSuccess()
+                },
+                onFailure = { onError(it.localizedMessage ?: "Gagal menghapus branch") }
+            )
+        }
     }
 
     fun refreshActiveWorkflowTab(onError: (String) -> Unit = {}, onSuccess: () -> Unit = {}) {
@@ -776,5 +1028,21 @@ class AppStateViewModel(application: Application) : AndroidViewModel(application
 
     fun refreshDownloads() {
         repository.dbHelper.refreshDownloads()
+    }
+
+    fun registerExtractedArtifactInDownloads(
+        repoFullName: String,
+        file: ExtractedArtifactFile,
+        runId: Long?,
+        onDone: (Result<DownloadRecord>) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val res = withContext(Dispatchers.IO) {
+                val src = File(file.localCachePath)
+                if (!src.exists()) return@withContext Result.failure<DownloadRecord>(IllegalStateException("File cache tidak ditemukan"))
+                repository.saveFileBytesToInternalDownloads(repoFullName, file.name, src.readBytes(), runId)
+            }
+            onDone(res)
+        }
     }
 }

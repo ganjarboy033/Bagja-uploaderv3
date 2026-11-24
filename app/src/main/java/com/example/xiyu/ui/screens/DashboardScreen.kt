@@ -46,6 +46,7 @@ fun DashboardScreen(
     val repos = dashState.repos
     val isLoadingRepos = dashState.isLoading
     val rateLimit by repository.rateLimit.collectAsState()
+    val palette = LocalKruzenPalette.current
 
     var repoToDelete by remember { mutableStateOf<GitHubRepo?>(null) }
 
@@ -63,7 +64,7 @@ fun DashboardScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(BrandCream)
+            .background(palette.cream)
             .verticalScroll(scrollState)
             .padding(horizontal = 20.dp, vertical = 16.dp)
             .testTag("dashboard_screen")
@@ -79,7 +80,7 @@ fun DashboardScreen(
                     text = "KRUZENLAB WORKSPACE ⚡",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    color = BrandRose,
+                    color = palette.rose,
                     letterSpacing = 1.6.sp
                 )
                 Spacer(modifier = Modifier.height(4.dp))
@@ -89,7 +90,7 @@ fun DashboardScreen(
                     fontWeight = FontWeight.Bold,
                     fontSize = 24.sp,
                     lineHeight = 30.sp,
-                    color = BrandDark
+                    color = palette.dark
                 )
             }
             RefreshIconButton(
@@ -106,8 +107,8 @@ fun DashboardScreen(
         // Account status card with live rate limit
         Surface(
             shape = RoundedCornerShape(20.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-            color = BrandCardBg,
+            border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+            color = palette.cardBg,
             modifier = Modifier.fillMaxWidth()
         ) {
             Row(
@@ -127,13 +128,13 @@ fun DashboardScreen(
                         modifier = Modifier
                             .size(42.dp)
                             .clip(CircleShape)
-                            .background(BrandDark),
+                            .background(palette.dark),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = "⚡",
                             fontSize = 20.sp,
-                            color = BrandCream
+                            color = palette.cream
                         )
                     }
                 }
@@ -143,7 +144,7 @@ fun DashboardScreen(
                         text = "@${currentUser?.login ?: "guest"}",
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
-                        color = BrandDark
+                        color = palette.dark
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         ThinHighlightText(
@@ -161,7 +162,7 @@ fun DashboardScreen(
                     Text(
                         text = "Switch",
                         fontSize = 11.sp,
-                        color = BrandRose
+                        color = palette.rose
                     )
                 }
             }
@@ -179,6 +180,7 @@ fun DashboardScreen(
                 label = "Repositories",
                 value = "${repos.size}",
                 sub = "Siap dikelola",
+                palette = palette,
                 modifier = Modifier.weight(1f)
             )
             MetricCard(
@@ -186,6 +188,7 @@ fun DashboardScreen(
                 label = "Batch Uploader",
                 value = "Ready",
                 sub = "ZIP · Atomic Tree",
+                palette = palette,
                 modifier = Modifier.weight(1f)
             )
             MetricCard(
@@ -193,6 +196,7 @@ fun DashboardScreen(
                 label = "Rate Limit",
                 value = "${rateLimit?.remaining ?: 5000}",
                 sub = "Permintaan tersisa",
+                palette = palette,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -207,14 +211,14 @@ fun DashboardScreen(
             Surface(
                 onClick = { onNavigate(Screen.RepoExplorer) },
                 shape = RoundedCornerShape(18.dp),
-                color = BrandCardBg,
-                border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
+                color = palette.cardBg,
+                border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
                 modifier = Modifier.weight(1f)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Icon(Icons.Default.FolderOpen, contentDescription = null, tint = BrandRose, modifier = Modifier.size(24.dp))
+                    Icon(Icons.Default.FolderOpen, contentDescription = null, tint = palette.rose, modifier = Modifier.size(24.dp))
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("File Manager", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("File Manager", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = palette.dark)
                     ThinHighlightText("CRUD file & folder cloud")
                 }
             }
@@ -222,14 +226,14 @@ fun DashboardScreen(
             Surface(
                 onClick = { onNavigate(Screen.WorkflowRelease) },
                 shape = RoundedCornerShape(18.dp),
-                color = BrandCardBg,
-                border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
+                color = palette.cardBg,
+                border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
                 modifier = Modifier.weight(1f)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Icon(Icons.Default.PlayCircle, contentDescription = null, tint = BrandDark, modifier = Modifier.size(24.dp))
+                    Icon(Icons.Default.PlayCircle, contentDescription = null, tint = palette.dark, modifier = Modifier.size(24.dp))
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("Workflows & CI", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("Workflows & CI", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = palette.dark)
                     ThinHighlightText("Actions run & Releases")
                 }
             }
@@ -240,8 +244,8 @@ fun DashboardScreen(
         // Main CTA Card: Start Atomic Upload
         Surface(
             shape = RoundedCornerShape(24.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-            color = BrandCardBg,
+            border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+            color = palette.cardBg,
             shadowElevation = 2.dp,
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -256,7 +260,7 @@ fun DashboardScreen(
                             text = "ATOMIC BATCH UPLOADER",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            color = BrandRose,
+                            color = palette.rose,
                             letterSpacing = 1.6.sp
                         )
                         Spacer(modifier = Modifier.height(4.dp))
@@ -264,7 +268,7 @@ fun DashboardScreen(
                             text = "Unggah Proyek ke GitHub.",
                             fontWeight = FontWeight.Bold,
                             fontSize = 20.sp,
-                            color = BrandDark
+                            color = palette.dark
                         )
                     }
                     Text(
@@ -279,7 +283,7 @@ fun DashboardScreen(
                     text = "Ekstrak file .zip otomatis, periksa struktur direktori, dan commit sekaligus dalam satu transaksi atomic tree Git v3.",
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
-                    color = BrandTextMuted
+                    color = palette.textMuted
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -287,8 +291,8 @@ fun DashboardScreen(
                 Button(
                     onClick = { onNavigate(Screen.Upload) },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = BrandDark,
-                        contentColor = BrandCream
+                        containerColor = palette.dark,
+                        contentColor = palette.cream
                     ),
                     shape = RoundedCornerShape(20.dp),
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
@@ -327,7 +331,7 @@ fun DashboardScreen(
                 text = "Repositori Anda (${repos.size})",
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp,
-                color = BrandDark
+                color = palette.dark
             )
             RefreshIconButton(
                 isRefreshing = isLoadingRepos,
@@ -348,8 +352,8 @@ fun DashboardScreen(
             repos.forEach { repo ->
                 Surface(
                     shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-                    color = BrandCardBg,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                    color = palette.cardBg,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 8.dp)
@@ -361,7 +365,7 @@ fun DashboardScreen(
                         Icon(
                             imageVector = Icons.Default.Folder,
                             contentDescription = null,
-                            tint = BrandRose,
+                            tint = palette.rose,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(10.dp))
@@ -370,7 +374,7 @@ fun DashboardScreen(
                                 text = repo.name,
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 13.sp,
-                                color = BrandDark
+                                color = palette.dark
                             )
                             ThinHighlightText(
                                 text = repo.description ?: "Default branch: ${repo.defaultBranch}",
@@ -432,32 +436,33 @@ private fun MetricCard(
     label: String,
     value: String,
     sub: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    palette: KruzenPalette = LocalKruzenPalette.current
 ) {
     Surface(
         shape = RoundedCornerShape(18.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-        color = BrandCardBg,
+        border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+        color = palette.cardBg,
         modifier = modifier
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = BrandRose,
+                tint = palette.rose,
                 modifier = Modifier.size(18.dp)
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = label,
                 fontSize = 10.sp,
-                color = BrandTextMuted
+                color = palette.textMuted
             )
             Text(
                 text = value,
                 fontWeight = FontWeight.Bold,
                 fontSize = 15.sp,
-                color = BrandDark,
+                color = palette.dark,
                 maxLines = 1
             )
             Spacer(modifier = Modifier.height(2.dp))

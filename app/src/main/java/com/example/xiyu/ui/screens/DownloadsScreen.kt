@@ -4,9 +4,11 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -14,6 +16,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -39,10 +42,12 @@ fun DownloadsScreen(
     appViewModel: AppStateViewModel,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalKruzenPalette.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val toastController = LocalToastController.current
     val downloads by appViewModel.downloads.collectAsState()
+    val configState by appViewModel.repository.dbHelper.configState.collectAsState()
 
     var isRefreshing by remember { mutableStateOf(false) }
     var recordToDelete by remember { mutableStateOf<DownloadRecord?>(null) }
@@ -77,7 +82,7 @@ fun DownloadsScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(BrandCream)
+            .background(palette.cream)
             .padding(horizontal = 16.dp, vertical = 10.dp)
             .testTag("downloads_screen")
     ) {
@@ -92,7 +97,7 @@ fun DownloadsScreen(
                     text = "KRUZENLAB DOWNLOADS ⚡",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    color = BrandRose,
+                    color = palette.rose,
                     letterSpacing = 1.5.sp
                 )
                 Text(
@@ -100,9 +105,9 @@ fun DownloadsScreen(
                     fontFamily = FontFamily.SansSerif,
                     fontWeight = FontWeight.Bold,
                     fontSize = 20.sp,
-                    color = BrandDark
+                    color = palette.dark
                 )
-                ThinHighlightText("Penyimpanan internal untuk APK, ZIP Actions & Build Logs.")
+                ThinHighlightText("Penyimpanan internal untuk APK, ZIP Actions & Build Logs.", color = palette.textMuted)
             }
 
             RefreshIconButton(
@@ -131,17 +136,17 @@ fun DownloadsScreen(
                     Icon(
                         imageVector = Icons.Default.DownloadForOffline,
                         contentDescription = null,
-                        tint = BrandRose,
+                        tint = palette.rose,
                         modifier = Modifier.size(52.dp)
                     )
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
                         text = "Belum ada berkas tersimpan.",
                         fontWeight = FontWeight.SemiBold,
-                        color = BrandDark
+                        color = palette.dark
                     )
                     Spacer(modifier = Modifier.height(4.dp))
-                    ThinHighlightText("Unduh artifak build atau simpan log dari tab Workflows.")
+                    ThinHighlightText("Unduh artifak build atau simpan log dari tab Workflows.", color = palette.textMuted)
                 }
             }
         } else {
@@ -152,8 +157,8 @@ fun DownloadsScreen(
                 items(downloads, key = { it.id }) { item ->
                     Surface(
                         shape = RoundedCornerShape(16.dp),
-                        color = BrandCardBg,
-                        border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
+                        color = palette.cardBg,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
@@ -161,7 +166,7 @@ fun DownloadsScreen(
                                 Box(
                                     modifier = Modifier
                                         .size(38.dp)
-                                        .background(BrandPalePink, RoundedCornerShape(10.dp)),
+                                        .background(palette.palePink, RoundedCornerShape(10.dp)),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
@@ -172,7 +177,7 @@ fun DownloadsScreen(
                                             else -> Icons.Default.InsertDriveFile
                                         },
                                         contentDescription = null,
-                                        tint = BrandDark,
+                                        tint = palette.dark,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -182,11 +187,12 @@ fun DownloadsScreen(
                                         text = item.fileName,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = BrandDark,
+                                        color = palette.dark,
                                         maxLines = 1
                                     )
                                     ThinHighlightText(
-                                        "${item.repoFullName} · ${ZipExtractor.formatSize(item.sizeBytes)} · ${sdf.format(Date(item.createdAt))}"
+                                        text = "${item.repoFullName} · ${ZipExtractor.formatSize(item.sizeBytes)} · ${sdf.format(Date(item.createdAt))}",
+                                        color = palette.textMuted
                                     )
                                 }
                                 ThinHighlightBadge(item.fileType.uppercase())
@@ -195,9 +201,51 @@ fun DownloadsScreen(
                             Spacer(modifier = Modifier.height(10.dp))
 
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
+                                if (configState.enableAutoInstallApk && item.fileType == "apk") {
+                                    Button(
+                                        onClick = {
+                                            try {
+                                                val f = File(item.localPath)
+                                                if (!f.exists()) {
+                                                    toastController.showError("Berkas APK tidak ditemukan")
+                                                    return@Button
+                                                }
+                                                val uri = FileProvider.getUriForFile(
+                                                    context,
+                                                    "${context.packageName}.fileprovider",
+                                                    f
+                                                )
+                                                val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                                                    setDataAndType(uri, "application/vnd.android.package-archive")
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                }
+                                                context.startActivity(installIntent)
+                                            } catch (e: Exception) {
+                                                toastController.showError("Gagal membuka installer APK: ${e.localizedMessage}")
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color(0xFF15803D),
+                                            contentColor = Color.White
+                                        ),
+                                        shape = RoundedCornerShape(10.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier
+                                            .height(32.dp)
+                                            .testTag("install_apk_btn_${item.id}")
+                                    ) {
+                                        Icon(Icons.Default.Android, null, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Instal APK", fontSize = 10.sp, maxLines = 1, softWrap = false)
+                                    }
+                                }
+
                                 OutlinedButton(
                                     onClick = {
                                         scope.launch {
@@ -219,7 +267,7 @@ fun DownloadsScreen(
                                 ) {
                                     Icon(Icons.Default.Visibility, null, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Inspeksi", fontSize = 10.sp)
+                                    Text("Inspeksi", fontSize = 10.sp, maxLines = 1, softWrap = false)
                                 }
 
                                 if (item.fileType == "zip") {
@@ -237,14 +285,14 @@ fun DownloadsScreen(
                                                 )
                                             }
                                         },
-                                        colors = ButtonDefaults.buttonColors(containerColor = BrandDark),
+                                        colors = ButtonDefaults.buttonColors(containerColor = palette.dark, contentColor = palette.cream),
                                         shape = RoundedCornerShape(10.dp),
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                         modifier = Modifier.height(32.dp)
                                     ) {
                                         Icon(Icons.Default.Unarchive, null, modifier = Modifier.size(14.dp))
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Ekstrak", fontSize = 10.sp)
+                                        Text("Ekstrak", fontSize = 10.sp, maxLines = 1, softWrap = false)
                                     }
                                 }
 
@@ -259,7 +307,7 @@ fun DownloadsScreen(
                                 ) {
                                     Icon(Icons.Default.SaveAlt, null, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Ekspor", fontSize = 10.sp)
+                                    Text("Ekspor", fontSize = 10.sp, maxLines = 1, softWrap = false)
                                 }
 
                                 IconButton(
@@ -283,7 +331,7 @@ fun DownloadsScreen(
                                     },
                                     modifier = Modifier.size(32.dp)
                                 ) {
-                                    Icon(Icons.Default.Share, contentDescription = "Bagikan", tint = BrandRose, modifier = Modifier.size(16.dp))
+                                    Icon(Icons.Default.Share, contentDescription = "Bagikan", tint = palette.rose, modifier = Modifier.size(16.dp))
                                 }
 
                                 IconButton(

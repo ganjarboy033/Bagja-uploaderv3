@@ -43,6 +43,7 @@ fun LoginScreen(
     onNavigate: (Screen) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalKruzenPalette.current
     val context = LocalContext.current
     val scrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
@@ -65,7 +66,7 @@ fun LoginScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(BrandCream)
+            .background(palette.cream)
             .verticalScroll(scrollState)
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -97,8 +98,8 @@ fun LoginScreen(
         // Main Login Card
         Surface(
             shape = RoundedCornerShape(26.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-            color = BrandCardBg,
+            border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+            color = palette.cardBg,
             shadowElevation = 2.dp,
             modifier = Modifier
                 .fillMaxWidth()
@@ -380,14 +381,41 @@ fun LoginScreen(
                     visualTransformation = PasswordVisualTransformation(),
                     shape = RoundedCornerShape(14.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = BrandRose,
-                        unfocusedBorderColor = BrandBorder,
-                        focusedLabelColor = BrandRose
+                        focusedBorderColor = palette.rose,
+                        unfocusedBorderColor = palette.border,
+                        focusedLabelColor = palette.rose
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("github_token_input")
                 )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = palette.palePink.copy(alpha = 0.7f),
+                    border = androidx.compose.foundation.BorderStroke(0.5.dp, palette.border),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VerifiedUser,
+                            contentDescription = null,
+                            tint = palette.rose,
+                            modifier = Modifier.size(14.dp).padding(top = 1.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        ThinHighlightText(
+                            text = "Tips >1.000 File: Disarankan Classic PAT (ghp_..., No Expiration) dengan scope 'repo' & 'workflow' agar sesi tidak putus HTTP 401 di tengah push.",
+                            fontSize = 10.sp,
+                            color = palette.dark
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 

@@ -14,15 +14,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.xiyu.ui.theme.BrandBorder
-import com.example.xiyu.ui.theme.BrandDark
-import com.example.xiyu.ui.theme.BrandRose
+import com.example.xiyu.ui.theme.LocalKruzenPalette
 
 @Composable
 fun AttributionFooter(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val palette = LocalKruzenPalette.current
     val attributionUrl = "https://github.com/AiraeXiyu/XIYU-GITHUB-UPLOADER"
 
     Column(
@@ -31,26 +30,26 @@ fun AttributionFooter(
             .padding(vertical = 16.dp, horizontal = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        HorizontalDivider(color = BrandBorder.copy(alpha = 0.6f), thickness = 0.75.dp)
+        HorizontalDivider(color = palette.border.copy(alpha = 0.6f), thickness = 0.75.dp)
         Spacer(modifier = Modifier.height(12.dp))
         Text(
             text = "kruzenlab-uploader",
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
-            color = BrandDark
+            color = palette.dark
         )
         Text(
             text = "Developed by DEV BAGJA / KruzenLab",
             fontSize = 10.sp,
             fontWeight = FontWeight.Medium,
-            color = BrandRose
+            color = palette.rose
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
             text = "Based on open-source architecture by AiraeXiyu (https://github.com/AiraeXiyu/XIYU-GITHUB-UPLOADER)",
             fontSize = 10.sp,
             fontWeight = FontWeight.Light,
-            color = BrandDark.copy(alpha = 0.7f),
+            color = palette.dark.copy(alpha = 0.7f),
             textAlign = TextAlign.Center,
             modifier = Modifier.clickable {
                 try {

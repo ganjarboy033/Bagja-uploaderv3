@@ -39,11 +39,12 @@ fun HomeScreen(
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
+    val palette = LocalKruzenPalette.current
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(BrandCream)
+            .background(palette.cream)
             .verticalScroll(scrollState)
             .padding(bottom = 32.dp)
             .testTag("home_screen")
@@ -57,8 +58,8 @@ fun HomeScreen(
             // Little sparkle chip
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
-                color = BrandCardBg.copy(alpha = 0.9f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                color = palette.cardBg.copy(alpha = 0.9f),
                 modifier = Modifier.padding(bottom = 16.dp)
             ) {
                 Row(
@@ -68,14 +69,14 @@ fun HomeScreen(
                     Icon(
                         imageVector = Icons.Default.Bolt,
                         contentDescription = null,
-                        tint = BrandAccent,
+                        tint = palette.accent,
                         modifier = Modifier.size(14.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "kruzenlab-uploader · Cloud Git Engine ⚡",
                         fontSize = 12.sp,
-                        color = BrandRose,
+                        color = palette.rose,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -88,7 +89,7 @@ fun HomeScreen(
                 fontWeight = FontWeight.Bold,
                 fontSize = 32.sp,
                 lineHeight = 38.sp,
-                color = BrandDark
+                color = palette.dark
             )
             Text(
                 text = "Atomic Batch Uploader.",
@@ -96,7 +97,7 @@ fun HomeScreen(
                 fontWeight = FontWeight.Bold,
                 fontSize = 32.sp,
                 lineHeight = 38.sp,
-                color = BrandRose
+                color = palette.rose
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -105,7 +106,7 @@ fun HomeScreen(
                 text = "Kelola repositori GitHub, unggah ZIP/file batch dengan commit atomic tunggal, edit kode di cloud, dan monitor CI/CD workflows dalam satu genggaman.",
                 fontSize = 13.sp,
                 lineHeight = 20.sp,
-                color = BrandTextMuted
+                color = palette.textMuted
             )
 
             Spacer(modifier = Modifier.height(18.dp))
@@ -118,8 +119,8 @@ fun HomeScreen(
                 Button(
                     onClick = { onNavigate(Screen.Upload) },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = BrandDark,
-                        contentColor = BrandCream
+                        containerColor = palette.dark,
+                        contentColor = palette.cream
                     ),
                     shape = RoundedCornerShape(24.dp),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
@@ -146,10 +147,10 @@ fun HomeScreen(
 
                 OutlinedButton(
                     onClick = { onNavigate(Screen.RepoExplorer) },
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
                     colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = BrandPalePink,
-                        contentColor = BrandDark
+                        containerColor = palette.palePink,
+                        contentColor = palette.dark
                     ),
                     shape = RoundedCornerShape(24.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -186,7 +187,7 @@ fun HomeScreen(
             // Hero Banner Card
             Card(
                 shape = RoundedCornerShape(24.dp),
-                border = androidx.compose.foundation.BorderStroke(2.dp, BrandCardBg),
+                border = androidx.compose.foundation.BorderStroke(2.dp, palette.cardBg),
                 elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -217,8 +218,8 @@ fun HomeScreen(
 
                     Surface(
                         shape = RoundedCornerShape(14.dp),
-                        color = BrandCardBg.copy(alpha = 0.95f),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
+                        color = palette.cardBg.copy(alpha = 0.95f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
                         modifier = Modifier
                             .padding(14.dp)
                             .align(Alignment.TopStart)
@@ -226,7 +227,7 @@ fun HomeScreen(
                         Text(
                             text = "kruzenlab-uploader ⚡",
                             fontSize = 11.sp,
-                            color = BrandDark,
+                            color = palette.dark,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                         )
@@ -246,7 +247,7 @@ fun HomeScreen(
                         Spacer(modifier = Modifier.height(2.dp))
                         ThinHighlightText(
                             text = "POST blob → POST tree → POST commit → PATCH ref (0-commit auto-init)",
-                            color = BrandCream.copy(alpha = 0.8f)
+                            color = BrandCream.copy(alpha = 0.85f)
                         )
                     }
                 }
@@ -266,25 +267,29 @@ fun HomeScreen(
                 icon = Icons.Default.CloudUpload,
                 title = "Atomic Batch ZIP Uploader",
                 description = "Ekstraksi ZIP langsung di Android, filter folder sampah, lalu push puluhan file dalam 1 commit tunggal.",
-                testTag = "feature_card_zip"
+                testTag = "feature_card_zip",
+                palette = palette
             )
             FeatureCard(
                 icon = Icons.Default.Folder,
                 title = "Cloud File Manager & Code Editor",
                 description = "Buat file/folder (.gitkeep), rename secara rekursif, hapus file batch, dan edit kode langsung di remote GitHub.",
-                testTag = "feature_card_repos"
+                testTag = "feature_card_repos",
+                palette = palette
             )
             FeatureCard(
                 icon = Icons.Default.PlayCircle,
                 title = "Actions & Release Monitor",
                 description = "Pantau status GitHub Actions workflow runs, trigger re-run, dan buat GitHub Release dengan tag.",
-                testTag = "feature_card_actions"
+                testTag = "feature_card_actions",
+                palette = palette
             )
             FeatureCard(
                 icon = Icons.Default.Tune,
                 title = "OAuth & Session Customizer",
                 description = "Atur Client ID, Secret, dan Session Password secara mandiri dengan automatic fallback dan thin highlight styling.",
-                testTag = "feature_card_auth"
+                testTag = "feature_card_auth",
+                palette = palette
             )
         }
 
@@ -300,12 +305,13 @@ private fun FeatureCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     description: String,
-    testTag: String
+    testTag: String,
+    palette: KruzenPalette = LocalKruzenPalette.current
 ) {
     Surface(
         shape = RoundedCornerShape(18.dp),
-        color = BrandCardBg,
-        border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
+        color = palette.cardBg,
+        border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
         shadowElevation = 1.dp,
         modifier = Modifier
             .fillMaxWidth()
@@ -319,13 +325,13 @@ private fun FeatureCard(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(BrandPalePink),
+                    .background(palette.palePink),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = BrandRose,
+                    tint = palette.rose,
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -335,7 +341,7 @@ private fun FeatureCard(
                     text = title,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = BrandDark
+                    color = palette.dark
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 ThinHighlightText(

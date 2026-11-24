@@ -15,6 +15,8 @@ import androidx.work.workDataOf
 import com.example.xiyu.data.database.AppDatabaseHelper
 import com.example.xiyu.data.model.TreeItem
 import com.example.xiyu.data.repository.GitHubRepository
+import com.example.xiyu.util.NotificationHelper
+import kotlinx.coroutines.delay
 import java.io.File
 
 class UploadWorker(
@@ -40,6 +42,7 @@ class UploadWorker(
 
         val dbHelper = AppDatabaseHelper.getInstance(applicationContext)
         val repository = GitHubRepository(applicationContext)
+        val pacerEnabled = dbHelper.configState.value.enableRateLimitPacer
 
         val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
         val wakeLock = powerManager.newWakeLock(
@@ -68,6 +71,7 @@ class UploadWorker(
 
             val treeItems = mutableListOf<TreeItem>()
             val total = batchItems.size
+            val usePacer = pacerEnabled && total > 500
 
             batchItems.forEachIndexed { index, item ->
                 if (item.status == "UPLOADED" && !item.blobSha.isNullOrBlank()) {
@@ -75,7 +79,11 @@ class UploadWorker(
                     treeItems.add(TreeItem(path = item.filePath.removePrefix("/"), sha = item.blobSha))
                 } else {
                     val pct = ((index + 1) * 80) / total
-                    val stage = "Upload (${index + 1}/$total): ${item.filePath}"
+                    val stage = if (usePacer) {
+                        "Upload terukur (${index + 1}/$total): ${item.filePath}"
+                    } else {
+                        "Upload (${index + 1}/$total): ${item.filePath}"
+                    }
                     setProgress(workDataOf(KEY_STAGE to stage, KEY_PROGRESS to pct))
                     try {
                         setForeground(createForegroundInfo(stage, pct))
@@ -94,12 +102,24 @@ class UploadWorker(
                     }
                     if (blobRes.isFailure) {
                         dbHelper.updateQueueItemCheckpointSync(item.id, null, "FAILED")
-                        // Retry on transient socket/network failure
+                        NotificationHelper.notifyError(
+                            applicationContext,
+                            title = "Upload Dijeda (Akan Dicoba Ulang)",
+                            message = "Gagal pada ${item.filePath}: ${blobRes.exceptionOrNull()?.localizedMessage ?: "Jaringan"}",
+                            targetRoute = "debug_panel"
+                        )
                         return Result.retry()
                     }
                     val blobSha = blobRes.getOrThrow()
                     dbHelper.updateQueueItemCheckpointSync(item.id, blobSha, "UPLOADED")
                     treeItems.add(TreeItem(path = item.filePath.removePrefix("/"), sha = blobSha))
+
+                    if (usePacer) {
+                        delay(55L)
+                        if ((index + 1) % 50 == 0) {
+                            delay(450L)
+                        }
+                    }
                 }
             }
 
@@ -110,6 +130,12 @@ class UploadWorker(
 
             val commitRes = repository.commitTreeAndPush(owner, repo, branch, commitMessage, treeItems)
             if (commitRes.isFailure) {
+                NotificationHelper.notifyError(
+                    applicationContext,
+                    title = "Commit Tree Gagal",
+                    message = commitRes.exceptionOrNull()?.localizedMessage ?: "Gagal commit ke $owner/$repo",
+                    targetRoute = "debug_panel"
+                )
                 return Result.retry()
             }
 
@@ -124,6 +150,12 @@ class UploadWorker(
             }
 
             setProgress(workDataOf(KEY_STAGE to "Push selesai!", KEY_PROGRESS to 100))
+            NotificationHelper.notifyActivity(
+                applicationContext,
+                title = "Push Berhasil ke $owner/$repo",
+                message = "${res.fileCount} berkas ter-commit ke branch $branch.",
+                targetRoute = "repo_explorer"
+            )
 
             Result.success(
                 Data.Builder()
@@ -133,6 +165,12 @@ class UploadWorker(
                     .build()
             )
         } catch (e: Exception) {
+            NotificationHelper.notifyError(
+                applicationContext,
+                title = "Upload Background Gagal",
+                message = e.localizedMessage ?: "Terjadi kesalahan saat push ke GitHub",
+                targetRoute = "debug_panel"
+            )
             Result.failure(workDataOf(KEY_ERROR to (e.localizedMessage ?: "Upload background error")))
         } finally {
             if (wakeLock.isHeld) {

@@ -28,6 +28,7 @@ import com.example.xiyu.ui.components.Topbar
 import com.example.xiyu.ui.navigation.Screen
 import com.example.xiyu.ui.screens.*
 import com.example.xiyu.ui.theme.XIYUUploaderTheme
+import com.example.xiyu.util.NotificationHelper
 import com.example.xiyu.util.OAuthHelper
 import com.example.xiyu.viewmodel.AppStateViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,22 +38,23 @@ class MainActivity : ComponentActivity() {
 
     private val appViewModel: AppStateViewModel by viewModels()
     private val pendingDeepLink = MutableStateFlow<Uri?>(null)
+    private val pendingNavigateRoute = MutableStateFlow<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        intent?.data?.let { uri ->
-            handleDeepLink(uri)
-        }
+        handleIncomingIntent(intent)
 
         setContent {
-            XIYUUploaderTheme {
+            val appConfig by appViewModel.repository.dbHelper.configState.collectAsState()
+            XIYUUploaderTheme(themeSettings = appConfig.themeSettings) {
                 val repository = appViewModel.repository
                 val currentUser by repository.currentUser.collectAsState()
                 val rateLimit by repository.rateLimit.collectAsState()
                 val downloads by appViewModel.downloads.collectAsState()
                 val incomingUri by pendingDeepLink.collectAsState()
+                val incomingRoute by pendingNavigateRoute.collectAsState()
 
                 val snackbarHostState = remember { SnackbarHostState() }
                 val toastController = remember { ToastController() }
@@ -64,6 +66,23 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(currentScreen) {
                     if (currentScreen != Screen.CiCdMonitor) {
                         appViewModel.clearCiCdCache()
+                    }
+                }
+
+                LaunchedEffect(incomingRoute) {
+                    incomingRoute?.let { route ->
+                        currentScreen = when (route) {
+                            Screen.Downloads.route -> Screen.Downloads
+                            Screen.RepoExplorer.route -> Screen.RepoExplorer
+                            Screen.DebugPanel.route -> Screen.DebugPanel
+                            Screen.Upload.route -> Screen.Upload
+                            Screen.WorkflowRelease.route -> Screen.WorkflowRelease
+                            Screen.CiCdMonitor.route -> Screen.CiCdMonitor
+                            Screen.Dashboard.route -> Screen.Dashboard
+                            Screen.Login.route -> Screen.Login
+                            else -> Screen.Home
+                        }
+                        pendingNavigateRoute.value = null
                     }
                 }
 
@@ -180,8 +199,17 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.data?.let { uri ->
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        intent?.data?.let { uri ->
             handleDeepLink(uri)
+        }
+        val targetRoute = intent?.getStringExtra(NotificationHelper.EXTRA_NAVIGATE_TO)
+        if (!targetRoute.isNullOrBlank()) {
+            pendingNavigateRoute.value = targetRoute
+            intent.removeExtra(NotificationHelper.EXTRA_NAVIGATE_TO)
         }
     }
 

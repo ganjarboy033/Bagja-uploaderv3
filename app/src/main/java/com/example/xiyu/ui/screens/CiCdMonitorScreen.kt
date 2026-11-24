@@ -57,6 +57,7 @@ fun CiCdMonitorScreen(
     appViewModel: AppStateViewModel,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalKruzenPalette.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val toastController = LocalToastController.current
@@ -86,7 +87,7 @@ fun CiCdMonitorScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(BrandCream)
+            .background(palette.cream)
             .padding(horizontal = 16.dp, vertical = 10.dp)
             .testTag("cicd_monitor_screen")
     ) {
@@ -101,7 +102,7 @@ fun CiCdMonitorScreen(
                     text = "KRUZENLAB CI/CD MONITOR ⚡",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    color = BrandRose,
+                    color = palette.rose,
                     letterSpacing = 1.4.sp
                 )
                 Text(
@@ -109,7 +110,7 @@ fun CiCdMonitorScreen(
                     fontFamily = FontFamily.SansSerif,
                     fontWeight = FontWeight.Bold,
                     fontSize = 20.sp,
-                    color = BrandDark
+                    color = palette.dark
                 )
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     ThinHighlightText("Error highlight Gradle · Ekstrak APK & Log otomatis")
@@ -464,7 +465,12 @@ private fun CiCdRunDetailDialog(
                             FileInputStream(src).use { inp -> inp.copyTo(out) }
                         }
                     }
-                    toastController.showSuccess("APK ${fileObj.name} berhasil disimpan!")
+                    appViewModel.registerExtractedArtifactInDownloads(
+                        repoFullName = "$owner/$repoName",
+                        file = fileObj,
+                        runId = run.id
+                    )
+                    toastController.showSuccess("APK ${fileObj.name} berhasil disimpan & masuk ke Downloads!")
                 } catch (e: Exception) {
                     toastController.showError("Gagal menyimpan APK: ${e.localizedMessage}")
                 }
@@ -784,7 +790,12 @@ private fun CiCdRunDetailDialog(
                                                         scope.launch {
                                                             saveApkToPublicDownloads(context, File(fileItem.localCachePath), fileItem.name).fold(
                                                                 onSuccess = {
-                                                                    toastController.showSuccess("APK ${fileItem.name} disimpan ke folder Download HP! Siap diinstal.")
+                                                                    appViewModel.registerExtractedArtifactInDownloads(
+                                                                        repoFullName = "$owner/$repoName",
+                                                                        file = fileItem,
+                                                                        runId = run.id
+                                                                    )
+                                                                    toastController.showSuccess("APK ${fileItem.name} disimpan ke Download HP & tab Downloads!")
                                                                 },
                                                                 onFailure = { err ->
                                                                     toastController.showError("Gagal simpan APK: ${err.localizedMessage}")

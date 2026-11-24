@@ -6,22 +6,30 @@ import android.content.Context
 import android.util.Base64
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.xiyu.data.model.BranchCompareResponse
 import com.example.xiyu.data.model.GitHubRepo
+import com.example.xiyu.data.model.GlobalCodeSearchResult
 import com.example.xiyu.data.model.RepoContentItem
 import com.example.xiyu.data.model.UserProfile
 import com.example.xiyu.ui.components.*
@@ -30,6 +38,9 @@ import com.example.xiyu.ui.theme.*
 import com.example.xiyu.util.ZipExtractor
 import com.example.xiyu.viewmodel.AppStateViewModel
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -39,15 +50,19 @@ fun RepoExplorerScreen(
     onNavigate: (Screen) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalKruzenPalette.current
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val toastController = LocalToastController.current
     val repository = appViewModel.repository
 
+    val configState by repository.dbHelper.configState.collectAsState()
+    val repoWebhooks by repository.dbHelper.repoWebhooks.collectAsState()
     val explorerState by appViewModel.explorerState.collectAsState()
     val repos = explorerState.repos
     val selectedRepo = explorerState.selectedRepo
     val selectedBranch = explorerState.selectedBranch
+    val branches = explorerState.branches
     val currentPath = explorerState.currentPath
     val contents = explorerState.currentContents
     val isLoading = explorerState.isLoading
@@ -62,6 +77,12 @@ fun RepoExplorerScreen(
     var dirToDelete by remember { mutableStateOf<RepoContentItem?>(null) }
     var itemToRename by remember { mutableStateOf<RepoContentItem?>(null) }
     var renameNewName by remember { mutableStateOf("") }
+
+    // New feature dialogs
+    var isDownloadingZip by remember { mutableStateOf(false) }
+    var showBranchCompareDialog by remember { mutableStateOf(false) }
+    var showGlobalSearchDialog by remember { mutableStateOf(false) }
+    var showVercelDeployDialog by remember { mutableStateOf(false) }
 
     // Multi-select for batch delete
     var isMultiSelectMode by remember { mutableStateOf(false) }
@@ -101,14 +122,14 @@ fun RepoExplorerScreen(
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = palette.cream,
         floatingActionButton = {
             if (selectedRepo != null) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FloatingActionButton(
                         onClick = { showCreateFolderDialog = true },
-                        containerColor = BrandDark,
-                        contentColor = BrandCream,
+                        containerColor = palette.dark,
+                        contentColor = palette.cream,
                         modifier = Modifier.testTag("fab_create_folder")
                     ) {
                         Icon(Icons.Default.CreateNewFolder, contentDescription = "New Folder")
@@ -116,9 +137,9 @@ fun RepoExplorerScreen(
                     ExtendedFloatingActionButton(
                         onClick = { showCreateFileDialog = true },
                         icon = { Icon(Icons.Default.NoteAdd, contentDescription = null) },
-                        text = { Text("New File") },
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        text = { Text("New File", maxLines = 1, softWrap = false) },
+                        containerColor = palette.dark,
+                        contentColor = palette.cream,
                         modifier = Modifier.testTag("fab_create_file")
                     )
                 }
@@ -131,7 +152,7 @@ fun RepoExplorerScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
-            // Header with Manual Refresh Control
+            // Header with Download ZIP, Refresh, Mulai Ulang Files, Global Search & Multi-Select
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -142,12 +163,49 @@ fun RepoExplorerScreen(
                         text = "Cloud File Manager",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground
+                        color = palette.dark
                     )
-                    ThinHighlightText("100% tanpa filter ekstensi · Cache folder persisten")
+                    ThinHighlightText("100% tanpa filter · Branch & Compare", color = palette.textMuted)
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Download Source ZIP left of Refresh
+                    if (selectedRepo != null) {
+                        IconButton(
+                            onClick = {
+                                if (!isDownloadingZip) {
+                                    isDownloadingZip = true
+                                    toastController.showInfo("Mengunduh Source ZIP (${selectedBranch})...", isLoading = true)
+                                    appViewModel.downloadExplorerSourceZip(
+                                        onError = { msg ->
+                                            isDownloadingZip = false
+                                            toastController.showError(msg)
+                                        },
+                                        onSuccess = { rec ->
+                                            isDownloadingZip = false
+                                            toastController.showSuccess("Source ZIP tersimpan: ${rec.fileName}")
+                                        }
+                                    )
+                                }
+                            },
+                            enabled = !isDownloadingZip,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("download_source_zip_btn")
+                        ) {
+                            if (isDownloadingZip) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = palette.rose)
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.DownloadForOffline,
+                                    contentDescription = "Unduh Source ZIP",
+                                    tint = palette.rose,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+
                     RefreshIconButton(
                         isRefreshing = isLoading,
                         contentDescription = "Refresh Repositori & Folder",
@@ -157,25 +215,67 @@ fun RepoExplorerScreen(
                                 else toastController.showSuccess("Daftar repositori & folder diperbarui")
                             }
                         },
-                        modifier = Modifier.testTag("refresh_explorer_header_btn")
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("refresh_explorer_header_btn")
                     )
+
+                    // Mulai Ulang Files (reset cache & reload active user workspace)
+                    IconButton(
+                        onClick = {
+                            toastController.showInfo("Memuat ulang workspace Files...", isLoading = true)
+                            appViewModel.resetExplorerWorkspace { err ->
+                                if (err != null) toastController.showError(err)
+                                else toastController.showSuccess("Files di-reset ke akun aktif!")
+                            }
+                        },
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("reset_explorer_workspace_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.RestartAlt,
+                            contentDescription = "Mulai Ulang Files",
+                            tint = palette.dark,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // Global Repo Code Search
+                    if (configState.enableGlobalRepoSearch && selectedRepo != null) {
+                        IconButton(
+                            onClick = { showGlobalSearchDialog = true },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("global_repo_search_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = "Cari Kode di Repo",
+                                tint = palette.rose,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
 
                     IconButton(
                         onClick = {
                             isMultiSelectMode = !isMultiSelectMode
                             selectedItemPaths.clear()
-                        }
+                        },
+                        modifier = Modifier.size(36.dp)
                     ) {
                         Icon(
                             imageVector = if (isMultiSelectMode) Icons.Default.CheckCircle else Icons.Default.Checklist,
                             contentDescription = "Multi Select",
-                            tint = if (isMultiSelectMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = if (isMultiSelectMode) palette.dark else palette.textMuted,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Repo Selector Dropdown
             var repoDropdownExpanded by remember { mutableStateOf(false) }
@@ -183,8 +283,8 @@ fun RepoExplorerScreen(
                 Surface(
                     onClick = { repoDropdownExpanded = true },
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BrandBorder),
+                    color = palette.cardBg,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -195,16 +295,18 @@ fun RepoExplorerScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Folder, contentDescription = null, tint = BrandRose)
+                            Icon(Icons.Default.Folder, contentDescription = null, tint = palette.rose)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = selectedRepo?.fullName ?: "Pilih Repositori...",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                maxLines = 1
+                                color = palette.dark,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
-                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = palette.dark)
                     }
                 }
 
@@ -224,13 +326,127 @@ fun RepoExplorerScreen(
                 }
             }
 
+            // Branch Switcher + Compare Branch + Vercel Deploy Row
+            if (selectedRepo != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                var branchDropdownExpanded by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        Surface(
+                            onClick = { branchDropdownExpanded = true },
+                            shape = RoundedCornerShape(10.dp),
+                            color = palette.palePink.copy(alpha = 0.7f),
+                            border = androidx.compose.foundation.BorderStroke(0.5.dp, palette.border),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("explorer_branch_switcher")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Icon(Icons.Default.AltRoute, contentDescription = null, tint = palette.rose, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Branch: $selectedBranch",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.dark,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = palette.dark, modifier = Modifier.size(18.dp))
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded = branchDropdownExpanded,
+                            onDismissRequest = { branchDropdownExpanded = false }
+                        ) {
+                            val branchNames = if (branches.isNotEmpty()) branches.map { it.name } else listOf(selectedBranch)
+                            branchNames.forEach { bName ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(bName, fontWeight = if (bName == selectedBranch) FontWeight.Bold else FontWeight.Normal)
+                                            if (bName == selectedRepo.defaultBranch) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                ThinHighlightBadge("default")
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        branchDropdownExpanded = false
+                                        appViewModel.selectExplorerBranch(bName) { err ->
+                                            if (err != null) toastController.showError(err)
+                                            else toastController.showSuccess("Beralih ke branch $bName")
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    if (configState.enableBranchCompare) {
+                        OutlinedButton(
+                            onClick = { showBranchCompareDialog = true },
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("branch_compare_btn")
+                        ) {
+                            Icon(Icons.Default.CompareArrows, contentDescription = null, tint = palette.rose, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Compare", fontSize = 11.sp, color = palette.dark, maxLines = 1, softWrap = false)
+                        }
+                    }
+
+                    if (configState.enableVercelWebhook) {
+                        val hasHook = repoWebhooks.any { it.repoFullName == selectedRepo.fullName }
+                        OutlinedButton(
+                            onClick = { showVercelDeployDialog = true },
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, if (hasHook) palette.accent else palette.border),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (hasHook) palette.dark else palette.cardBg,
+                                contentColor = if (hasHook) palette.cream else palette.dark
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("vercel_deploy_explorer_btn")
+                        ) {
+                            Icon(
+                                Icons.Default.RocketLaunch,
+                                contentDescription = null,
+                                tint = if (hasHook) palette.accent else palette.rose,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Vercel", fontSize = 11.sp, maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
 
             // Breadcrumbs Bar with Per-Folder Manual Refresh Button
             Surface(
                 shape = RoundedCornerShape(10.dp),
-                color = BrandCardBg,
-                border = androidx.compose.foundation.BorderStroke(0.5.dp, BrandBorder),
+                color = palette.cardBg,
+                border = androidx.compose.foundation.BorderStroke(0.5.dp, palette.border),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -242,19 +458,24 @@ fun RepoExplorerScreen(
                     Icon(
                         imageVector = Icons.Default.Home,
                         contentDescription = "Root",
-                        tint = BrandDark,
+                        tint = palette.dark,
                         modifier = Modifier
                             .size(18.dp)
                             .clickable { appViewModel.openExplorerPath("") }
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "/", color = BrandRose, fontWeight = FontWeight.Bold)
+                    Text(text = "/", color = palette.rose, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.width(6.dp))
 
                     val pathSegments = currentPath.split("/").filter { it.isNotBlank() }
-                    Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         if (pathSegments.isEmpty()) {
-                            ThinHighlightText("(root folder)")
+                            ThinHighlightText("(root folder)", color = palette.textMuted)
                         } else {
                             pathSegments.forEachIndexed { index, seg ->
                                 val segPath = pathSegments.take(index + 1).joinToString("/")
@@ -262,11 +483,11 @@ fun RepoExplorerScreen(
                                     text = seg,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = BrandDark,
+                                    color = palette.dark,
                                     modifier = Modifier.clickable { appViewModel.openExplorerPath(segPath) }
                                 )
                                 if (index < pathSegments.size - 1) {
-                                    Text(text = " / ", fontSize = 12.sp, color = BrandRose)
+                                    Text(text = " / ", fontSize = 12.sp, color = palette.rose)
                                 }
                             }
                         }
@@ -280,7 +501,7 @@ fun RepoExplorerScreen(
                             },
                             modifier = Modifier.size(30.dp)
                         ) {
-                            Icon(Icons.Default.ArrowUpward, contentDescription = "Naik Folder", modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.ArrowUpward, contentDescription = "Naik Folder", tint = palette.dark, modifier = Modifier.size(16.dp))
                         }
                     }
 
@@ -328,7 +549,7 @@ fun RepoExplorerScreen(
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             shape = RoundedCornerShape(8.dp)
                         ) {
-                            Text("Hapus Semua", fontSize = 11.sp)
+                            Text("Hapus Semua", fontSize = 11.sp, maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -344,7 +565,7 @@ fun RepoExplorerScreen(
                         .weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator()
+                    CircularProgressIndicator(color = palette.dark)
                 }
             } else if (contents.isEmpty()) {
                 Box(
@@ -357,12 +578,12 @@ fun RepoExplorerScreen(
                         Icon(
                             imageVector = Icons.Default.FolderOpen,
                             contentDescription = null,
-                            tint = BrandRose,
+                            tint = palette.rose,
                             modifier = Modifier.size(48.dp)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("Folder ini kosong.", fontWeight = FontWeight.Medium)
-                        ThinHighlightText("Gunakan tombol New File / Folder di bawah.")
+                        Text("Folder ini kosong.", fontWeight = FontWeight.Medium, color = palette.dark)
+                        ThinHighlightText("Gunakan tombol New File / Folder di bawah.", color = palette.textMuted)
                     }
                 }
             } else {
@@ -388,9 +609,8 @@ fun RepoExplorerScreen(
                                 }
                             },
                             shape = RoundedCornerShape(12.dp),
-                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                            else MaterialTheme.colorScheme.surface,
-                            border = androidx.compose.foundation.BorderStroke(0.5.dp, BrandBorder),
+                            color = if (isSelected) palette.palePink else palette.cardBg,
+                            border = androidx.compose.foundation.BorderStroke(0.5.dp, palette.border),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
@@ -414,7 +634,7 @@ fun RepoExplorerScreen(
                                 Icon(
                                     imageVector = if (isDir) Icons.Default.Folder else Icons.Default.InsertDriveFile,
                                     contentDescription = null,
-                                    tint = if (isDir) BrandRose else BrandDark,
+                                    tint = if (isDir) palette.rose else palette.dark,
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
@@ -423,11 +643,13 @@ fun RepoExplorerScreen(
                                     Text(
                                         text = item.name,
                                         fontSize = 13.sp,
-                                        fontWeight = if (isDir) FontWeight.Bold else FontWeight.Medium
+                                        fontWeight = if (isDir) FontWeight.Bold else FontWeight.Medium,
+                                        color = palette.dark
                                     )
                                     ThinHighlightText(
-                                        if (isDir) "Direktori · Tap untuk membuka"
-                                        else "${ZipExtractor.formatSize(item.size)} · SHA: ${item.sha.take(7)}"
+                                        text = if (isDir) "Direktori · Tap untuk membuka"
+                                        else "${ZipExtractor.formatSize(item.size)} · SHA: ${item.sha.take(7)}",
+                                        color = palette.textMuted
                                     )
                                 }
 
@@ -438,7 +660,7 @@ fun RepoExplorerScreen(
                                         onClick = { itemMenuExpanded = true },
                                         modifier = Modifier.size(28.dp)
                                     ) {
-                                        Icon(Icons.Default.MoreVert, contentDescription = "Actions", modifier = Modifier.size(18.dp))
+                                        Icon(Icons.Default.MoreVert, contentDescription = "Actions", tint = palette.dark, modifier = Modifier.size(18.dp))
                                     }
 
                                     DropdownMenu(
@@ -452,6 +674,44 @@ fun RepoExplorerScreen(
                                                 onClick = {
                                                     itemMenuExpanded = false
                                                     selectedRepo?.let { openItemInUniversalEditor(it, item) }
+                                                }
+                                            )
+
+                                            DropdownMenuItem(
+                                                text = { Text("Simpan ke Downloads") },
+                                                leadingIcon = { Icon(Icons.Default.SaveAlt, contentDescription = null) },
+                                                onClick = {
+                                                    itemMenuExpanded = false
+                                                    selectedRepo?.let { repo ->
+                                                        coroutineScope.launch {
+                                                            toastController.showInfo("Menyimpan ${item.name} ke Downloads...", isLoading = true)
+                                                            repository.getSingleFileContent(
+                                                                owner = repo.fullName.substringBefore('/'),
+                                                                repo = repo.name,
+                                                                path = item.path,
+                                                                branch = selectedBranch
+                                                            ).fold(
+                                                                onSuccess = { fullItem ->
+                                                                    val rawBytes = if (!fullItem.content.isNullOrBlank()) {
+                                                                        try {
+                                                                            Base64.decode(fullItem.content.replace("\n", ""), Base64.DEFAULT)
+                                                                        } catch (_: Exception) {
+                                                                            fullItem.content.toByteArray(Charsets.UTF_8)
+                                                                        }
+                                                                    } else ByteArray(0)
+                                                                    appViewModel.saveExplorerFileToDownloads(
+                                                                        fileName = item.name,
+                                                                        bytes = rawBytes,
+                                                                        onError = { err -> toastController.showError(err) },
+                                                                        onSuccess = { rec -> toastController.showSuccess("${rec.fileName} disimpan ke Downloads!") }
+                                                                    )
+                                                                },
+                                                                onFailure = { err ->
+                                                                    toastController.showError("Gagal unduh file: ${err.localizedMessage}")
+                                                                }
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                             )
 
@@ -525,6 +785,343 @@ fun RepoExplorerScreen(
 
             AttributionFooter()
         }
+    }
+
+    // Dialog: Branch Compare & Merge
+    if (showBranchCompareDialog && selectedRepo != null) {
+        val branchNames = remember(branches, selectedBranch) {
+            val list = branches.map { it.name }.toMutableList()
+            if (!list.contains(selectedBranch)) list.add(0, selectedBranch)
+            list.distinct()
+        }
+        var baseBranch by remember { mutableStateOf(selectedRepo.defaultBranch) }
+        var headBranch by remember {
+            mutableStateOf(branchNames.firstOrNull { it != baseBranch } ?: selectedBranch)
+        }
+        var baseMenuExpanded by remember { mutableStateOf(false) }
+        var headMenuExpanded by remember { mutableStateOf(false) }
+        var compareResult by remember { mutableStateOf<BranchCompareResponse?>(null) }
+        var isComparing by remember { mutableStateOf(false) }
+        var isMerging by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { if (!isMerging) showBranchCompareDialog = false },
+            title = { Text("Bandingkan & Merge Branch", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = palette.dark) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ThinHighlightText("Pilih Base (target) dan Head (sumber perubahan) untuk melihat diff file.", color = palette.textMuted)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            OutlinedButton(
+                                onClick = { baseMenuExpanded = true },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Base: $baseBranch", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            DropdownMenu(expanded = baseMenuExpanded, onDismissRequest = { baseMenuExpanded = false }) {
+                                branchNames.forEach { b ->
+                                    DropdownMenuItem(text = { Text(b) }, onClick = { baseBranch = b; baseMenuExpanded = false })
+                                }
+                            }
+                        }
+                        Box(modifier = Modifier.weight(1f)) {
+                            OutlinedButton(
+                                onClick = { headMenuExpanded = true },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Head: $headBranch", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            DropdownMenu(expanded = headMenuExpanded, onDismissRequest = { headMenuExpanded = false }) {
+                                branchNames.forEach { b ->
+                                    DropdownMenuItem(text = { Text(b) }, onClick = { headBranch = b; headMenuExpanded = false })
+                                }
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            isComparing = true
+                            val owner = selectedRepo.fullName.substringBefore('/')
+                            coroutineScope.launch {
+                                repository.compareBranches(owner, selectedRepo.name, baseBranch, headBranch).fold(
+                                    onSuccess = { res -> compareResult = res },
+                                    onFailure = { err -> toastController.showError("Compare gagal: ${err.localizedMessage}") }
+                                )
+                                isComparing = false
+                            }
+                        },
+                        enabled = !isComparing && baseBranch != headBranch,
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.dark, contentColor = palette.cream),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (isComparing) {
+                            CircularProgressIndicator(color = palette.cream, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text("Bandingkan $baseBranch...$headBranch", fontSize = 12.sp)
+                        }
+                    }
+
+                    if (baseBranch == headBranch) {
+                        ThinHighlightText("Pilih dua branch yang berbeda untuk membandingkan diff.", color = palette.rose)
+                    }
+
+                    compareResult?.let { cmp ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = palette.cream,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "Status: ${cmp.status ?: "compared"} · +${cmp.aheadBy} ahead / -${cmp.behindBy} behind (${cmp.totalCommits} commit)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.dark
+                                )
+                                if (cmp.files.isEmpty()) {
+                                    ThinHighlightText("Tidak ada perbedaan file antar branch ini.", color = palette.textMuted)
+                                } else {
+                                    cmp.files.take(25).forEach { f ->
+                                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                            Text(
+                                                text = f.filename,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 10.sp,
+                                                color = palette.dark,
+                                                modifier = Modifier.weight(1f),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "${f.status} (+${f.additions}/-${f.deletions})",
+                                                fontSize = 10.sp,
+                                                color = palette.rose
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (cmp.aheadBy > 0) {
+                            Button(
+                                onClick = {
+                                    isMerging = true
+                                    val owner = selectedRepo.fullName.substringBefore('/')
+                                    coroutineScope.launch {
+                                        repository.mergeBranch(
+                                            owner = owner,
+                                            repo = selectedRepo.name,
+                                            baseBranch = baseBranch,
+                                            headBranch = headBranch,
+                                            commitMessage = "Merge $headBranch into $baseBranch via kruzenlab-uploader"
+                                        ).fold(
+                                            onSuccess = {
+                                                isMerging = false
+                                                showBranchCompareDialog = false
+                                                toastController.showSuccess("Branch $headBranch berhasil di-merge ke $baseBranch!")
+                                                appViewModel.refreshCurrentExplorerFolder()
+                                            },
+                                            onFailure = { err ->
+                                                isMerging = false
+                                                toastController.showError("Merge gagal: ${err.localizedMessage}")
+                                            }
+                                        )
+                                    }
+                                },
+                                enabled = !isMerging,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF15803D), contentColor = Color.White),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(if (isMerging) "Menggabungkan..." else "Merge $headBranch → $baseBranch", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { if (!isMerging) showBranchCompareDialog = false }) {
+                    Text("Tutup", color = palette.rose)
+                }
+            },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = palette.cardBg
+        )
+    }
+
+    // Dialog: Global Repo Code Search
+    if (showGlobalSearchDialog && selectedRepo != null) {
+        var searchQuery by remember { mutableStateOf("") }
+        var searchResults by remember { mutableStateOf<List<GlobalCodeSearchResult>>(emptyList()) }
+        var isSearching by remember { mutableStateOf(false) }
+        var hasSearched by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { showGlobalSearchDialog = false },
+            title = { Text("Cari Kode di ${selectedRepo.name}", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = palette.dark) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = { Text("Kata kunci kode / nama simbol...", fontSize = 12.sp) },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = {
+                                if (searchQuery.isBlank()) return@Button
+                                isSearching = true
+                                hasSearched = true
+                                val owner = selectedRepo.fullName.substringBefore('/')
+                                coroutineScope.launch {
+                                    repository.searchRepoCode(owner, selectedRepo.name, searchQuery.trim()).fold(
+                                        onSuccess = { list -> searchResults = list },
+                                        onFailure = { err -> toastController.showError("Pencarian gagal: ${err.localizedMessage}") }
+                                    )
+                                    isSearching = false
+                                }
+                            },
+                            enabled = !isSearching && searchQuery.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = palette.dark, contentColor = palette.cream),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(if (isSearching) "..." else "Cari", fontSize = 11.sp, maxLines = 1, softWrap = false)
+                        }
+                    }
+
+                    if (isSearching) {
+                        Box(modifier = Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp), color = palette.dark)
+                        }
+                    } else if (hasSearched && searchResults.isEmpty()) {
+                        ThinHighlightText("Tidak ada berkas yang cocok dengan \"$searchQuery\".", color = palette.textMuted)
+                    } else if (searchResults.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 280.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            searchResults.forEach { res ->
+                                Surface(
+                                    onClick = {
+                                        showGlobalSearchDialog = false
+                                        openItemInUniversalEditor(
+                                            selectedRepo,
+                                            RepoContentItem(
+                                                name = res.name,
+                                                path = res.path,
+                                                sha = res.sha,
+                                                size = 0L,
+                                                type = "file"
+                                            )
+                                        )
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = palette.cream,
+                                    border = androidx.compose.foundation.BorderStroke(0.5.dp, palette.border),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(res.name, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = palette.dark)
+                                        ThinHighlightText(res.path, fontSize = 10.sp, color = palette.rose, maxLines = 1)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showGlobalSearchDialog = false }) {
+                    Text("Tutup", color = palette.rose)
+                }
+            },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = palette.cardBg
+        )
+    }
+
+    // Dialog: Vercel 1-Click Deploy Hook for Active Repo
+    if (showVercelDeployDialog && selectedRepo != null) {
+        val existingHook = repoWebhooks.find { it.repoFullName == selectedRepo.fullName }
+        var hookInput by remember(existingHook) { mutableStateOf(existingHook?.vercelHookUrl ?: "") }
+        var isDeploying by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { if (!isDeploying) showVercelDeployDialog = false },
+            title = { Text("Vercel 1-Click Deploy", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = palette.dark) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(selectedRepo.fullName, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = palette.rose)
+                    OutlinedTextField(
+                        value = hookInput,
+                        onValueChange = { hookInput = it },
+                        label = { Text("Vercel Deploy Hook URL") },
+                        placeholder = { Text("https://api.vercel.com/v1/integrations/deploy/...") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (existingHook != null && existingHook.lastDeployedAt > 0L) {
+                        val sdf = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
+                        ThinHighlightText("Deploy terakhir: ${sdf.format(Date(existingHook.lastDeployedAt))}", color = palette.textMuted)
+                    }
+                    ThinHighlightText("URL Hook disimpan lokal per repositori di SQLite.", color = palette.textMuted)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cleanUrl = hookInput.trim()
+                        if (!cleanUrl.startsWith("http")) {
+                            toastController.showError("Masukkan URL Webhook Vercel yang valid!")
+                            return@Button
+                        }
+                        isDeploying = true
+                        coroutineScope.launch {
+                            repository.dbHelper.saveRepoWebhook(selectedRepo.fullName, cleanUrl)
+                            repository.triggerVercelWebhook(selectedRepo.fullName, cleanUrl).fold(
+                                onSuccess = { msg ->
+                                    isDeploying = false
+                                    showVercelDeployDialog = false
+                                    toastController.showSuccess(msg)
+                                },
+                                onFailure = { err ->
+                                    isDeploying = false
+                                    toastController.showError("Deploy gagal: ${err.localizedMessage}")
+                                }
+                            )
+                        }
+                    },
+                    enabled = !isDeploying && hookInput.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.dark, contentColor = palette.cream)
+                ) {
+                    Text(if (isDeploying) "Memicu..." else "Simpan & Deploy ⚡")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { if (!isDeploying) showVercelDeployDialog = false }) {
+                    Text("Batal", color = palette.rose)
+                }
+            },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = palette.cardBg
+        )
     }
 
     // Dialog: Create New File

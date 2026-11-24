@@ -334,3 +334,93 @@ data class RateLimitCore(
     val reset: Long,
     val used: Int
 )
+
+enum class ThemeMode {
+    DEFAULT_BRAND,
+    LIGHT,
+    DARK,
+    SYSTEM
+}
+
+data class ThemeSettingsEntity(
+    val themeMode: ThemeMode = ThemeMode.DEFAULT_BRAND,
+    val fontScale: Float = 1.0f,
+    val customPrimaryHex: String = "",
+    val customSecondaryHex: String = "",
+    val customAccentHex: String = "",
+    val customTextHex: String = ""
+)
+
+data class RepoWebhookEntity(
+    val repoFullName: String,
+    val vercelHookUrl: String,
+    val lastDeployedAt: Long = 0L
+)
+
+data class BranchCompareResponse(
+    val status: String? = null,
+    @SerializedName("ahead_by") val aheadBy: Int = 0,
+    @SerializedName("behind_by") val behindBy: Int = 0,
+    @SerializedName("total_commits") val totalCommits: Int = 0,
+    @SerializedName("html_url") val htmlUrl: String? = null,
+    val files: List<CompareFileItem> = emptyList()
+)
+
+data class CompareFileItem(
+    val filename: String,
+    val status: String = "modified",
+    val additions: Int = 0,
+    val deletions: Int = 0,
+    val changes: Int = 0,
+    val patch: String? = null
+)
+
+data class MergeBranchRequest(
+    val base: String,
+    val head: String,
+    @SerializedName("commit_message") val commitMessage: String
+)
+
+data class MergeBranchResponse(
+    val sha: String? = null,
+    val merged: Boolean = true,
+    val message: String? = null
+)
+
+data class UpdateRepoRequest(
+    @SerializedName("default_branch") val defaultBranch: String
+)
+
+data class GlobalCodeSearchResponse(
+    @SerializedName("total_count") val totalCount: Int = 0,
+    val items: List<GlobalCodeSearchResult> = emptyList()
+)
+
+data class GlobalCodeSearchResult(
+    val name: String,
+    val path: String,
+    val sha: String = "",
+    @SerializedName("html_url") val htmlUrl: String? = null
+)
+
+data class HttpErrorAdvice(
+    val statusCode: Int,
+    val title: String,
+    val meaning: String,
+    val cause: String,
+    val solution: String,
+    val quickActionLabel: String? = null,
+    val quickActionRoute: String? = null
+)
+
+enum class ImportConflictDecision {
+    REPLACE,
+    SKIP
+}
+
+data class PendingImportConflict(
+    val path: String,
+    val existingEntry: FileEntry,
+    val incomingEntry: FileEntry
+)
+

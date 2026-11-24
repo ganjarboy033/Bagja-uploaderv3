@@ -28,9 +28,15 @@ object ZipExtractor {
      * Unrestricted file extraction: does NOT filter out dotfiles, config files, binaries, or extensions.
      * Only optionally strips nested .git object folders if explicitly requested by user toggle.
      */
-    fun shouldSkip(path: String, removeGit: Boolean): Boolean {
+    fun shouldSkip(
+        path: String,
+        removeGit: Boolean,
+        smartGitignore: Boolean = false,
+        customRules: SmartGitignoreFilter.ParsedRules = SmartGitignoreFilter.ParsedRules()
+    ): Boolean {
         if (path.isBlank()) return true
         if (removeGit && GIT_REGEX.containsMatchIn(path)) return true
+        if (smartGitignore && SmartGitignoreFilter.shouldIgnore(path, true, customRules)) return true
         return false
     }
 
@@ -48,6 +54,7 @@ object ZipExtractor {
         inputStream: InputStream,
         stagingDir: File,
         removeGit: Boolean = false,
+        smartGitignore: Boolean = false,
         onProgress: (Int, String, Long) -> Unit = { _, _, _ -> }
     ): List<FileEntry> {
         if (!stagingDir.exists()) stagingDir.mkdirs()
@@ -58,11 +65,12 @@ object ZipExtractor {
         val buffer = ByteArray(8192)
         var cumulativeBytes = 0L
         var index = 0
+        var parsedGitignore = SmartGitignoreFilter.ParsedRules()
 
         while (zipEntry != null) {
             val name = cleanPath(zipEntry.name)
 
-            if (!zipEntry.isDirectory && !shouldSkip(name, removeGit)) {
+            if (!zipEntry.isDirectory && !shouldSkip(name, removeGit, smartGitignore, parsedGitignore)) {
                 if (entries.size >= MAX_FILES_COUNT) {
                     throw IllegalStateException("Maksimal $MAX_FILES_COUNT berkas dalam satu batch upload.")
                 }
@@ -87,6 +95,12 @@ object ZipExtractor {
                     }
                 }
 
+                if (smartGitignore && name.substringAfterLast('/').equals(".gitignore", ignoreCase = true) && fileTotal <= 256 * 1024) {
+                    runCatching {
+                        parsedGitignore = SmartGitignoreFilter.parseGitignoreText(outFile.readText())
+                    }
+                }
+
                 entries.add(
                     FileEntry(
                         path = name,
@@ -106,20 +120,32 @@ object ZipExtractor {
         }
 
         // Preserve root structure unless every file shares a single archive wrapper folder
-        if (entries.size > 1) {
-            val firstSegment = entries.first().path.split("/").firstOrNull()
+        val filteredEntries = if (smartGitignore && (parsedGitignore.directoryNames.isNotEmpty() || parsedGitignore.exactNames.isNotEmpty() || parsedGitignore.extensions.isNotEmpty())) {
+            entries.filterNot { entry ->
+                val skip = SmartGitignoreFilter.shouldIgnore(entry.path, true, parsedGitignore)
+                if (skip && !entry.localStagingPath.isNullOrBlank()) {
+                    runCatching { File(entry.localStagingPath).delete() }
+                }
+                skip
+            }
+        } else {
+            entries
+        }
+
+        if (filteredEntries.size > 1) {
+            val firstSegment = filteredEntries.first().path.split("/").firstOrNull()
             if (firstSegment != null &&
                 !firstSegment.startsWith(".") &&
-                entries.all { it.path.startsWith("$firstSegment/") }
+                filteredEntries.all { it.path.startsWith("$firstSegment/") }
             ) {
-                return entries.map {
+                return filteredEntries.map {
                     val stripped = it.path.removePrefix("$firstSegment/")
                     it.copy(path = stripped, rawRelativePath = stripped)
                 }
             }
         }
 
-        return entries
+        return filteredEntries
     }
 
     /**

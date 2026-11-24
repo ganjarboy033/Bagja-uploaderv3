@@ -234,6 +234,55 @@ interface GitHubApiService {
         @Path("artifact_id") artifactId: Long
     ): Response<ResponseBody>
 
+    // Source ZIP, Branch Compare/Merge/Delete, Default Branch & Code Search
+    @Streaming
+    @GET("repos/{owner}/{repo}/zipball/{ref}")
+    suspend fun downloadRepoZipball(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("ref") ref: String
+    ): Response<ResponseBody>
+
+    @GET("repos/{owner}/{repo}/compare/{basehead}")
+    suspend fun compareBranches(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path(value = "basehead", encoded = true) basehead: String
+    ): BranchCompareResponse
+
+    @POST("repos/{owner}/{repo}/merges")
+    suspend fun mergeBranches(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Body request: MergeBranchRequest
+    ): Response<MergeBranchResponse>
+
+    @PATCH("repos/{owner}/{repo}")
+    suspend fun updateRepository(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Body request: UpdateRepoRequest
+    ): Response<GitHubRepoResponse>
+
+    @DELETE("repos/{owner}/{repo}/git/refs/heads/{branch}")
+    suspend fun deleteBranchRef(
+        @Header("Authorization") auth: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path(value = "branch", encoded = true) branch: String
+    ): Response<Unit>
+
+    @GET("search/code")
+    suspend fun searchCode(
+        @Header("Authorization") auth: String,
+        @Query("q") query: String,
+        @Query("per_page") perPage: Int = 30
+    ): GlobalCodeSearchResponse
+
     companion object {
         const val DEFAULT_BASE_URL = "https://api.github.com/"
 

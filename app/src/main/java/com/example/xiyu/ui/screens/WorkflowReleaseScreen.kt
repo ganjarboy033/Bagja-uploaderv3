@@ -47,6 +47,7 @@ fun WorkflowReleaseScreen(
     onNavigate: (Screen) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalKruzenPalette.current
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val toastController = LocalToastController.current
@@ -66,6 +67,8 @@ fun WorkflowReleaseScreen(
     // Modals
     var showCreateReleaseDialog by remember { mutableStateOf(false) }
     var showCreateBranchDialog by remember { mutableStateOf(false) }
+    var createBranchInitialSource by remember { mutableStateOf<String?>(null) }
+    var branchToDelete by remember { mutableStateOf<String?>(null) }
     var selectedRunForDetail by remember { mutableStateOf<WorkflowRun?>(null) }
 
     LaunchedEffect(Unit) {
@@ -74,7 +77,7 @@ fun WorkflowReleaseScreen(
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = palette.cream,
         floatingActionButton = {
             if (selectedRepo != null) {
                 when (selectedTab) {
@@ -83,18 +86,21 @@ fun WorkflowReleaseScreen(
                             onClick = { showCreateReleaseDialog = true },
                             icon = { Icon(Icons.Default.Sell, contentDescription = null) },
                             text = { Text("New Release") },
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            containerColor = palette.dark,
+                            contentColor = palette.cream,
                             modifier = Modifier.testTag("fab_create_release")
                         )
                     }
                     2 -> {
                         ExtendedFloatingActionButton(
-                            onClick = { showCreateBranchDialog = true },
+                            onClick = {
+                                createBranchInitialSource = state.selectedBranch
+                                showCreateBranchDialog = true
+                            },
                             icon = { Icon(Icons.Default.AltRoute, contentDescription = null) },
                             text = { Text("New Branch") },
-                            containerColor = BrandDark,
-                            contentColor = BrandCream,
+                            containerColor = palette.dark,
+                            contentColor = palette.cream,
                             modifier = Modifier.testTag("fab_create_branch")
                         )
                     }
@@ -119,7 +125,7 @@ fun WorkflowReleaseScreen(
                         text = "Workflows & Releases",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground
+                        color = palette.dark
                     )
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         ThinHighlightText("Log CI/CD, Artifak APK, Release Asset & Branch")
@@ -306,7 +312,31 @@ fun WorkflowReleaseScreen(
                             }
                         }
                     )
-                    2 -> BranchesList(branches = branches, currentBranch = selectedRepo?.defaultBranch ?: "main")
+                    2 -> BranchesList(
+                        branches = branches,
+                        defaultBranch = selectedRepo?.defaultBranch ?: "main",
+                        activeBranch = state.selectedBranch,
+                        palette = palette,
+                        onSelectActive = { branchName ->
+                            appViewModel.syncWorkflowBranchSelection(branchName)
+                            toastController.showSuccess("Active branch: $branchName (tersinkron ke Files)")
+                        },
+                        onSetDefault = { branchName ->
+                            toastController.showInfo("Mengatur $branchName sebagai default...", isLoading = true)
+                            appViewModel.setWorkflowDefaultBranch(
+                                branchName = branchName,
+                                onError = { toastController.showError(it) },
+                                onSuccess = { toastController.showSuccess("$branchName sekarang menjadi Default Branch!") }
+                            )
+                        },
+                        onCreateFromBranch = { branchName ->
+                            createBranchInitialSource = branchName
+                            showCreateBranchDialog = true
+                        },
+                        onRequestDelete = { branchName ->
+                            branchToDelete = branchName
+                        }
+                    )
                 }
             }
 
@@ -557,8 +587,13 @@ fun WorkflowReleaseScreen(
     // Modal: Create Branch (Real Git Refs API)
     if (showCreateBranchDialog && selectedRepo != null) {
         var newBranchName by remember { mutableStateOf("") }
-        var sourceBranch by remember(branches, selectedRepo) {
-            mutableStateOf(branches.firstOrNull { it.name == selectedRepo.defaultBranch } ?: branches.firstOrNull())
+        var sourceBranch by remember(branches, selectedRepo, createBranchInitialSource) {
+            val preferred = createBranchInitialSource ?: selectedRepo.defaultBranch
+            mutableStateOf(
+                branches.firstOrNull { it.name == preferred }
+                    ?: branches.firstOrNull { it.name == selectedRepo.defaultBranch }
+                    ?: branches.firstOrNull()
+            )
         }
         var sourceExpanded by remember { mutableStateOf(false) }
 
@@ -636,6 +671,26 @@ fun WorkflowReleaseScreen(
                     Text("Batal")
                 }
             }
+        )
+    }
+
+    // Modal: Confirm Delete Non-Default Branch
+    if (branchToDelete != null && selectedRepo != null) {
+        val targetBranch = branchToDelete!!
+        UniversalConfirmDialog(
+            title = "Hapus Branch GitHub?",
+            message = "Cabang \"$targetBranch\" pada ${selectedRepo.fullName} akan dihapus permanen via DELETE /git/refs/heads/$targetBranch.",
+            confirmText = "Hapus Branch",
+            isDestructive = true,
+            onConfirm = {
+                toastController.showInfo("Menghapus branch $targetBranch...", isLoading = true)
+                appViewModel.deleteWorkflowBranch(
+                    branchName = targetBranch,
+                    onError = { toastController.showError(it) },
+                    onSuccess = { toastController.showSuccess("Branch $targetBranch berhasil dihapus!") }
+                )
+            },
+            onDismiss = { branchToDelete = null }
         )
     }
 }
@@ -930,39 +985,121 @@ private fun ColumnScope.ActionsList(
 }
 
 @Composable
-private fun ColumnScope.BranchesList(branches: List<GitHubBranch>, currentBranch: String) {
-    LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(branches, key = { it.name }) { b ->
-            val isCurrent = b.name == currentBranch
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = androidx.compose.foundation.BorderStroke(
-                    if (isCurrent) 1.dp else 0.5.dp,
-                    if (isCurrent) MaterialTheme.colorScheme.primary else BrandBorder
-                ),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+private fun ColumnScope.BranchesList(
+    branches: List<GitHubBranch>,
+    defaultBranch: String,
+    activeBranch: String,
+    palette: KruzenPalette,
+    onSelectActive: (String) -> Unit,
+    onSetDefault: (String) -> Unit,
+    onCreateFromBranch: (String) -> Unit,
+    onRequestDelete: (String) -> Unit
+) {
+    if (branches.isEmpty()) {
+        Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Default.AltRoute, contentDescription = null, tint = palette.rose, modifier = Modifier.size(40.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Belum ada branch terdeteksi.", color = palette.dark)
+                ThinHighlightText("Tap Refresh atau buat branch baru dengan tombol di bawah.", color = palette.textMuted)
+            }
+        }
+    } else {
+        LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(branches, key = { it.name }) { b ->
+                val isDefault = b.name == defaultBranch
+                val isActive = b.name == activeBranch
+                var menuExpanded by remember { mutableStateOf(false) }
+
+                Surface(
+                    onClick = { onSelectActive(b.name) },
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isActive) palette.palePink.copy(alpha = 0.55f) else palette.cardBg,
+                    border = androidx.compose.foundation.BorderStroke(
+                        if (isActive || isDefault) 1.dp else 0.5.dp,
+                        if (isActive) palette.dark else if (isDefault) palette.rose else palette.border
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.AltRoute,
-                            contentDescription = null,
-                            tint = if (isCurrent) MaterialTheme.colorScheme.primary else BrandRose,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(text = b.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                            ThinHighlightText("Commit SHA: ${b.commit.sha.take(7)}")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(
+                                imageVector = Icons.Default.AltRoute,
+                                contentDescription = null,
+                                tint = if (isActive) palette.dark else palette.rose,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = b.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = palette.dark)
+                                ThinHighlightText("Commit SHA: ${b.commit.sha.take(7)} · Tap untuk jadikan aktif", color = palette.textMuted)
+                            }
                         }
-                    }
-                    if (isCurrent) {
-                        ThinHighlightBadge("Default Branch", badgeColor = MaterialTheme.colorScheme.primary)
+
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (isDefault) {
+                                ThinHighlightBadge("Default", badgeColor = palette.rose)
+                            }
+                            if (isActive) {
+                                ThinHighlightBadge("Active", badgeColor = palette.dark)
+                            }
+                            Box {
+                                IconButton(
+                                    onClick = { menuExpanded = true },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Default.MoreVert, contentDescription = "Aksi Branch", tint = palette.dark, modifier = Modifier.size(18.dp))
+                                }
+                                DropdownMenu(
+                                    expanded = menuExpanded,
+                                    onDismissRequest = { menuExpanded = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Pilih sebagai Active Branch") },
+                                        leadingIcon = { Icon(Icons.Default.CheckCircleOutline, null) },
+                                        onClick = {
+                                            menuExpanded = false
+                                            onSelectActive(b.name)
+                                        }
+                                    )
+                                    if (!isDefault) {
+                                        DropdownMenuItem(
+                                            text = { Text("Jadikan Default Branch") },
+                                            leadingIcon = { Icon(Icons.Default.StarOutline, null) },
+                                            onClick = {
+                                                menuExpanded = false
+                                                onSetDefault(b.name)
+                                            }
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text("Buat Branch Baru dari Sini") },
+                                        leadingIcon = { Icon(Icons.Default.CallSplit, null) },
+                                        onClick = {
+                                            menuExpanded = false
+                                            onCreateFromBranch(b.name)
+                                        }
+                                    )
+                                    if (!isDefault) {
+                                        HorizontalDivider()
+                                        DropdownMenuItem(
+                                            text = { Text("Hapus Branch", color = MaterialTheme.colorScheme.error) },
+                                            leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                                            onClick = {
+                                                menuExpanded = false
+                                                onRequestDelete(b.name)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
